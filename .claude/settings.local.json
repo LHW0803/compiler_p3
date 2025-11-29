@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flex:*)",
+      "Bash(bison:*)",
+      "Bash(gcc:*)",
+      "Bash(make:*)",
+      "Bash(docker --version:*)",
+      "Bash(docker run:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

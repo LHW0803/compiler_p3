@@ -1,0 +1,2686 @@
+================================================================================
+                    PROJECT 3: SEMANTIC ANALYZER
+                        상세 분석 보고서
+================================================================================
+
+작성일: 2025-11-27
+프로젝트: SubC 컴파일러 - Semantic Analysis Phase
+마감일: November 30, 2025
+
+================================================================================
+목차
+================================================================================
+
+PART 1: 프로젝트 배경 및 목표
+PART 2: Semantic Analysis 기본 지식
+PART 3: 요구사항 상세 분석 (15가지 Semantic Checks)
+PART 4: 기존 코드 완전 분석
+PART 5: 구현 가이드
+PART 6: 테스트 케이스 분석
+PART 7: 구현 전략 및 팁
+
+
+================================================================================
+PART 1: 프로젝트 배경 및 목표
+================================================================================
+
+1.1 컴파일러 파이프라인에서의 위치
+────────────────────────────────────────────────────────────────────────
+
+    소스코드 (SubC)
+         ↓
+    [Lexical Analysis]  ← Project 1 (Flex 사용)
+         ↓
+    Token Stream
+         ↓
+    [Syntax Analysis]   ← Project 2 (Bison 사용)
+         ↓
+    Parse Tree / AST
+         ↓
+    [Semantic Analysis] ← Project 3 (현재 프로젝트, 수동 구현)
+         ↓
+    Annotated AST
+         ↓
+    [Code Generation]   ← Project 4
+         ↓
+    Assembly Code
+
+
+1.2 Semantic Analysis의 역할
+────────────────────────────────────────────────────────────────────────
+
+Semantic Analysis(의미 분석)는 구문적으로 올바른 프로그램이 의미적으로도
+올바른지 검사하는 단계입니다.
+
+**주요 역할:**
+1. 타입 검사 (Type Checking)
+   - 연산의 피연산자 타입이 올바른가?
+   - 대입 연산의 좌변과 우변 타입이 호환되는가?
+
+2. 선언 추적 (Declaration Tracking)
+   - 사용되는 모든 변수/함수가 선언되었는가?
+   - 같은 이름이 중복 선언되지 않았는가?
+
+3. 스코프 검사 (Scope Checking)
+   - 변수가 사용 가능한 범위 내에서 사용되는가?
+   - 지역 변수와 전역 변수가 올바르게 구분되는가?
+
+**왜 중요한가?**
+- 구문 분석만으로는 발견할 수 없는 에러 감지
+- 예: "int a; char b; a = b;"는 구문적으로 올바르지만 의미적으로 에러
+
+
+1.3 SubC 언어 개요
+────────────────────────────────────────────────────────────────────────
+
+SubC는 C 언어의 단순화된 부분집합입니다.
+
+**지원하는 기능:**
+- 기본 타입: int, char, void
+- 포인터 타입
+- 배열
+- 구조체 (struct)
+- 함수 (재귀 없음)
+- 제어 구조: if, while, for, return
+
+**지원하지 않는 기능:**
+- typedef
+- union, enum
+- 함수 포인터
+- 재귀 함수
+- 전처리기 (#define, #include 등)
+- 가변 인자 함수
+- static, extern 등 storage class
+
+
+1.4 프로젝트 목표
+────────────────────────────────────────────────────────────────────────
+
+**최종 목표:**
+SubC 프로그램을 입력받아 모든 의미적 오류를 검출하고, 적절한 에러
+메시지를 출력하는 Semantic Analyzer 구현
+
+**구체적 목표:**
+1. Scoped Symbol Table 구현
+2. 15가지 Semantic Checks 구현
+3. 정확한 에러 메시지 출력
+4. 에러 발생 후에도 분석 계속 진행 (Error Recovery)
+
+
+================================================================================
+PART 2: SEMANTIC ANALYSIS 기본 지식
+================================================================================
+
+2.1 Symbol Table의 개념
+────────────────────────────────────────────────────────────────────────
+
+**정의:**
+Symbol Table은 프로그램에 나타나는 모든 식별자(변수, 함수, 타입 등)의
+정보를 저장하는 자료구조입니다.
+
+**저장하는 정보:**
+- 이름 (name)
+- 종류 (kind): 변수, 함수, 구조체, 타입 등
+- 타입 (type): int, char*, struct foo 등
+- 스코프 (scope): 어느 범위에서 유효한가
+- 추가 정보: 함수의 매개변수 목록, 구조체의 멤버 등
+
+**왜 필요한가?**
+- 변수가 선언되었는지 확인
+- 변수의 타입을 알아내서 타입 검사 수행
+- 스코프 규칙 적용
+
+
+2.2 Scoped Symbol Table
+────────────────────────────────────────────────────────────────────────
+
+**스코프란?**
+프로그램의 특정 영역에서 선언된 식별자가 유효한 범위
+
+**C 언어의 스코프 규칙:**
+1. Block Scope: { } 안에서 선언된 변수는 그 블록 내에서만 유효
+2. Function Scope: 함수 매개변수는 함수 전체에서 유효
+3. File Scope: 함수 밖에서 선언된 변수는 파일 전체에서 유효
+
+**예제:**
+```c
+int global;        // File scope
+
+int func(int a) {  // a는 Function scope
+    int b;         // b는 이 함수의 Block scope
+
+    {
+        int c;     // c는 이 블록의 Block scope
+        b = c;     // OK
+    }
+
+    b = c;         // ERROR: c는 스코프 밖
+}
+```
+
+**Scoped Symbol Table의 구조:**
+
+방법 1: Symbol Table의 Stack
+- 각 스코프마다 별도의 Symbol Table 유지
+- 새 스코프 진입 시 push, 종료 시 pop
+- 검색 시 현재 스코프부터 외부 스코프로 순차 검색
+
+방법 2: 단일 Hash Table + Scope Level
+- 하나의 Hash Table 사용
+- 각 심볼에 scope level 정보 저장
+- 같은 이름의 심볼이 여러 개 있을 수 있음 (다른 스코프)
+
+
+2.3 Type System 설계
+────────────────────────────────────────────────────────────────────────
+
+**Type의 종류:**
+
+1. Basic Types (기본 타입)
+   - int
+   - char
+   - void
+
+2. Derived Types (파생 타입)
+   - Pointer: int*, char**, struct foo* 등
+   - Array: int[10], char[20] 등
+   - Function: int func(int, char) 등
+   - Struct: struct foo 등
+
+**Type 표현 방법:**
+
+재귀적 구조체 사용:
+
+```c
+typedef enum {
+    TYPE_INT,
+    TYPE_CHAR,
+    TYPE_VOID,
+    TYPE_POINTER,
+    TYPE_ARRAY,
+    TYPE_STRUCT,
+    TYPE_FUNC
+} TypeKind;
+
+typedef struct Type {
+    TypeKind kind;
+    union {
+        struct Type *ptrTo;              // for POINTER
+        struct {
+            struct Type *elemType;
+            int size;
+        } array;                         // for ARRAY
+        struct {
+            char *name;
+            struct FieldList *fields;
+        } structure;                     // for STRUCT
+        struct {
+            struct Type *retType;
+            struct ParamList *params;
+        } function;                      // for FUNC
+    } data;
+} Type;
+```
+
+**예제:**
+- int: {kind: TYPE_INT}
+- int*: {kind: TYPE_POINTER, data.ptrTo: {kind: TYPE_INT}}
+- int[10]: {kind: TYPE_ARRAY, data.array.elemType: {kind: TYPE_INT},
+            data.array.size: 10}
+
+
+2.4 타입 검사 (Type Checking)
+────────────────────────────────────────────────────────────────────────
+
+**타입 검사란?**
+표현식의 모든 연산자가 올바른 타입의 피연산자를 받는지 확인하는 것
+
+**Type Inference vs Type Checking:**
+- Type Inference: 표현식의 타입을 계산
+- Type Checking: 계산된 타입이 올바른지 검사
+
+**예제:**
+```c
+int a;
+char b;
+int *p;
+
+a + 5      // Type Inference: int + int → int
+           // Type Checking: OK (둘 다 int)
+
+a + b      // Type Inference: int + char → ?
+           // Type Checking: ERROR (타입 불일치)
+
+a = p      // Type Checking: ERROR (int와 int*는 호환 불가)
+```
+
+**Type Compatibility (타입 호환성):**
+- Exact Match: 정확히 같은 타입만 허용 (SubC의 원칙)
+- Type Coercion: 암묵적 타입 변환 허용 (C 표준, SubC는 없음)
+
+
+2.5 Error Recovery (에러 복구)
+────────────────────────────────────────────────────────────────────────
+
+**왜 필요한가?**
+하나의 에러 발견 시 바로 종료하면, 프로그래머가 한 번에 하나의 에러만
+알 수 있어서 비효율적입니다.
+
+**Error Recovery 전략:**
+
+1. NULL 반환 방식
+   - 에러 발생 시 NULL을 반환
+   - 후속 계산에서 NULL 체크하여 추가 에러 방지
+
+   ```c
+   expr
+     : expr '+' expr
+       {
+           if ($1 == NULL || $3 == NULL) {
+               $$ = NULL;  // 이미 에러 발생
+           } else if ($1->type != TYPE_INT || $3->type != TYPE_INT) {
+               error_binary();
+               $$ = NULL;  // 에러 발생, NULL 반환
+           } else {
+               $$ = make_expr(TYPE_INT);
+           }
+       }
+     ;
+   ```
+
+2. 에러 발생 후에도 분석 계속
+   - yyparse() 종료하지 않음
+   - 최대한 많은 에러 발견 목표
+
+
+================================================================================
+PART 3: 요구사항 상세 분석 (15가지 SEMANTIC CHECKS)
+================================================================================
+
+3.1 Undeclared Variables and Functions
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:** "use of undeclared identifier"
+
+**이론적 배경:**
+C 언어는 모든 식별자를 사용하기 전에 반드시 선언해야 합니다. 이는:
+1. 타입 안정성 보장
+2. 오타 감지
+3. 명확한 프로그램 구조
+
+**검사 방법:**
+1. 변수/함수 사용 시 Symbol Table에서 검색
+2. 현재 스코프부터 외부 스코프까지 순차 검색
+3. 모든 스코프에서 찾지 못하면 에러
+
+**주의사항:**
+- SubC는 implicit declaration 없음 (C89와 다름)
+- 함수는 호출 전에 반드시 선언되어야 함
+- 재귀 함수 없음 (가정)
+
+**정상 케이스:**
+```c
+int a;           // 선언
+a = 5;           // 사용 - OK
+
+int func() {
+    return 0;
+}
+
+int main() {
+    func();      // 호출 - OK
+}
+```
+
+**에러 케이스:**
+```c
+a = 5;           // ERROR: 선언 없이 사용
+
+int main() {
+    int b;
+    {
+        int c;
+        c = 1;   // OK
+    }
+    c = 2;       // ERROR: 스코프 밖
+}
+
+void foo() {
+    bar();       // ERROR: bar 선언 없음
+}
+```
+
+**구현 포인트:**
+- lookup 함수는 현재 스코프부터 전역 스코프까지 검색
+- 함수는 전역 스코프에만 존재 (SubC 가정)
+
+
+3.2 Redeclarations (재선언)
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:** "redeclaration"
+
+**이론적 배경:**
+같은 스코프에서 같은 이름의 식별자를 두 번 선언하는 것은 모호성을
+야기합니다.
+
+**검사 규칙:**
+
+1. **변수 (Variable):**
+   - 같은 스코프 내에서 재선언 불가
+   - 다른 스코프에서는 가능 (shadowing)
+
+2. **함수 (Function):**
+   - 모든 스코프에서 재선언 불가
+   - 함수는 항상 전역으로 간주
+
+3. **구조체 (Struct):**
+   - 모든 스코프에서 재선언 불가
+   - 구조체 타입은 항상 전역으로 간주
+
+**정상 케이스:**
+```c
+int a;           // 전역
+int main() {
+    int b;       // 지역
+    {
+        int a;   // OK: 다른 스코프 (shadowing)
+        int c;
+    }
+    {
+        int c;   // OK: 다른 스코프
+    }
+}
+```
+
+**에러 케이스:**
+```c
+// 변수 재선언
+int a;
+int a;           // ERROR: 같은 스코프
+
+int main() {
+    int b;
+    char b;      // ERROR: 같은 스코프
+}
+
+// 함수 재선언
+int func() { return 0; }
+int func() { return 1; }  // ERROR
+
+int main() {
+    int func() { }  // ERROR: 함수는 전역에만 (구현상 에러)
+}
+
+// 구조체 재선언
+struct foo { int x; };
+struct foo { int y; };  // ERROR
+
+int main() {
+    struct bar { int x; };
+    {
+        struct bar { int y; };  // ERROR: 구조체는 전역으로 취급
+    }
+}
+```
+
+**구현 포인트:**
+- 변수: 현재 스코프에서만 검색
+- 함수/구조체: 전역 Symbol Table에서 검색
+- 이름 충돌 (변수 vs 함수 vs 구조체)는 고려하지 않음
+
+
+3.3 Assignment Operator (=)
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:**
+1. "lvalue is not assignable"
+2. "cannot assign 'NULL' to non-pointer type"
+3. "incompatible types for assignment operation"
+
+**이론적 배경:**
+대입 연산자는 왼쪽에 수정 가능한 위치(lvalue), 오른쪽에 호환되는
+타입의 값이 와야 합니다.
+
+**검사 순서 (반드시 이 순서대로!):**
+1. LHS가 lvalue인가?
+2. RHS가 NULL이고 LHS가 포인터가 아닌가?
+3. LHS와 RHS의 타입이 같은가?
+
+**lvalue란?**
+- Left-value: 대입 연산자의 왼쪽에 올 수 있는 표현식
+- 메모리 위치를 가리키는 표현식
+- 변수, 배열 원소, 구조체 멤버, 포인터 역참조 등
+
+**SubC의 lvalue:**
+- 변수: OK
+- 배열 원소 (a[i]): OK
+- 포인터 역참조 (*p): OK
+- 구조체 멤버 (s.x, p->x): OK
+- 배열 이름 (a): NOT lvalue (C 표준과 동일)
+- 상수: NOT lvalue
+- 함수 호출 결과: NOT lvalue (SubC에서)
+
+**NULL의 특수성:**
+- NULL은 포인터 타입에만 대입 가능
+- NULL은 타입이 없음 (untyped)
+- 모든 포인터 타입과 호환
+
+**정상 케이스:**
+```c
+int a;
+char b;
+int *p;
+int arr[10];
+struct foo { int x; } s;
+
+a = 5;           // OK
+b = 'c';         // OK
+p = NULL;        // OK: 포인터에 NULL
+arr[0] = 10;     // OK: 배열 원소는 lvalue
+s.x = 20;        // OK: 구조체 멤버는 lvalue
+*p = 30;         // OK: 포인터 역참조는 lvalue
+```
+
+**에러 케이스:**
+```c
+int a;
+char b;
+int *p;
+int arr[10];
+
+5 = a;           // ERROR: lvalue is not assignable (상수)
+arr = p;         // ERROR: lvalue is not assignable (배열)
+func() = a;      // ERROR: lvalue is not assignable (함수 결과)
+
+a = NULL;        // ERROR: cannot assign 'NULL' to non-pointer type
+
+a = b;           // ERROR: incompatible types (int vs char)
+p = &a + 1;      // ERROR: incompatible types (추론 타입 불일치)
+```
+
+**구현 포인트:**
+- lvalue 여부를 판단하는 플래그 필요 (isLvalue)
+- NULL은 특수 토큰으로 처리
+- 타입 비교는 정확히 일치해야 함 (no coercion)
+
+
+3.4 Binary Operators (+, -, *, /, %, &&, ||)
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:** "invalid operands to binary expression"
+
+**이론적 배경:**
+산술 및 논리 연산자는 특정 타입의 피연산자만 받을 수 있습니다.
+SubC는 타입 변환을 하지 않으므로 엄격한 타입 일치가 필요합니다.
+
+**검사 규칙:**
+- 모든 binary operator는 양쪽이 **정확히 int 타입**이어야 함
+- char, pointer, array 등 모두 불가
+
+**정상 케이스:**
+```c
+int a, b, c;
+c = a + b;       // OK
+c = a - b;       // OK
+c = a * b;       // OK
+c = a / b;       // OK
+c = a % b;       // OK
+c = a && b;      // OK
+c = a || b;      // OK
+```
+
+**에러 케이스:**
+```c
+int a;
+char b;
+int *p;
+int arr[10];
+
+a + b;           // ERROR: int + char
+a + p;           // ERROR: int + pointer
+a + arr;         // ERROR: int + array
+p + 1;           // ERROR: pointer + int (C에서는 OK, SubC는 NO)
+a && b;          // ERROR: int && char
+b % b;           // ERROR: char % char
+```
+
+**왜 이렇게 엄격한가?**
+- SubC는 간단한 서브셋
+- 타입 변환 규칙 제거로 구현 단순화
+- 명확한 타입 사용 강제
+
+**구현 포인트:**
+- 양쪽 피연산자 타입 모두 확인
+- 타입이 정확히 TYPE_INT인지 체크
+- 결과 타입은 int
+
+
+3.5 Unary Operators (-, ++, --, !)
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:** "invalid argument type to unary expression"
+
+**검사 규칙:**
+1. **unary -**: int만 허용
+2. **++ / --**: int 또는 char 허용 (lvalue여야 함)
+3. **!**: int만 허용
+
+**이론적 배경:**
+단항 연산자도 타입 제약이 있으며, 특히 ++/--는 피연산자를 수정하므로
+lvalue여야 합니다.
+
+**정상 케이스:**
+```c
+int a;
+char b;
+
+-a;              // OK: unary - on int
+a++;             // OK: ++ on int
+++a;             // OK
+b++;             // OK: ++ on char (SubC 특징)
+--b;             // OK
+!a;              // OK: ! on int
+```
+
+**에러 케이스:**
+```c
+int a;
+char b;
+int *p;
+int arr[10];
+
+-b;              // ERROR: unary - on char
+-p;              // ERROR: unary - on pointer
+p++;             // ERROR: ++ on pointer
+arr++;           // ERROR: ++ on array (또한 lvalue 아님)
+!b;              // ERROR: ! on char
+!p;              // ERROR: ! on pointer
+```
+
+**특이사항:**
+- C 표준: ++/--는 모든 산술 타입과 포인터에 적용 가능
+- SubC: int와 char만 가능
+
+**구현 포인트:**
+- ++/-- 는 lvalue 체크도 필요
+- 결과 타입은 피연산자와 동일 (++/--의 경우)
+- 결과 타입은 int (unary -, !의 경우)
+
+
+3.6 Relational Operators (>=, >, <=, <)
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:** "types are not comparable in binary expression"
+
+**검사 규칙:**
+- int OP int: OK
+- char OP char: OK
+- 다른 모든 조합: ERROR
+
+**결과 타입:** int (boolean을 int로 표현)
+
+**이론적 배경:**
+비교 연산은 같은 종류의 값만 비교 가능합니다. SubC는 타입 변환이
+없으므로 정확히 같은 타입만 비교 가능합니다.
+
+**정상 케이스:**
+```c
+int a, b, result;
+char c, d;
+
+result = a > b;      // OK: int > int, result는 int
+result = a >= b;     // OK
+result = c < d;      // OK: char < char, result는 int
+result = c <= d;     // OK
+
+if (a > 10) { }      // OK
+```
+
+**에러 케이스:**
+```c
+int a;
+char b;
+int *p, *q;
+
+a > b;           // ERROR: int vs char
+a >= p;          // ERROR: int vs pointer
+p > q;           // ERROR: pointer vs pointer (C는 OK, SubC는 NO)
+```
+
+**구현 포인트:**
+- 양쪽 피연산자 타입 체크
+- int끼리 또는 char끼리만 허용
+- 결과는 항상 int 타입
+
+
+3.7 Equality Operators (==, !=)
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:** "types are not comparable in binary expression"
+
+**검사 규칙:**
+- int == int: OK
+- char == char: OK
+- pointer == pointer (같은 타입): OK
+- struct* == struct* (같은 struct 타입): OK
+- 다른 모든 조합: ERROR
+
+**결과 타입:** int
+
+**이론적 배경:**
+동등 비교는 관계 연산자보다 더 넓은 타입을 허용합니다. 특히 포인터
+비교가 가능합니다 (같은 타입의 포인터만).
+
+**정상 케이스:**
+```c
+int a, b;
+char c, d;
+int *p, *q;
+char *s, *t;
+struct foo { int x; } *fp1, *fp2;
+
+a == b;          // OK: int == int
+c != d;          // OK: char != char
+p == q;          // OK: int* == int*
+s != t;          // OK: char* != char*
+p == NULL;       // OK: pointer == NULL
+fp1 == fp2;      // OK: 같은 struct 타입의 포인터
+```
+
+**에러 케이스:**
+```c
+int a;
+char b;
+int *p;
+char *s;
+int arr[10];
+struct foo *fp;
+struct bar *bp;
+
+a == b;          // ERROR: int vs char
+p == s;          // ERROR: int* vs char*
+p == arr;        // 입력으로 들어오지 않음 (가정)
+arr == arr;      // 입력으로 들어오지 않음 (가정)
+fp == bp;        // ERROR: 다른 struct 타입
+```
+
+**주의사항:**
+- NULL은 모든 포인터와 비교 가능
+- 포인터 타입은 정확히 일치해야 함
+- 구조체 포인터는 구조체 이름까지 일치해야 함
+
+**구현 포인트:**
+- 타입 체크 시 포인터의 경우 깊이 비교 필요
+- struct 포인터는 struct 이름 비교
+
+
+3.8 Indirection Operator (unary *)
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:** "indirection requires pointer operand"
+
+**검사 규칙:**
+피연산자는 반드시 포인터 타입
+
+**결과 타입:**
+포인터가 가리키는 타입
+예: int* → int, char** → char*, struct foo* → struct foo
+
+**이론적 배경:**
+Indirection(역참조)는 포인터가 가리키는 메모리의 값을 가져오는
+연산입니다. 포인터가 아닌 값에는 적용할 수 없습니다.
+
+**정상 케이스:**
+```c
+int *p;
+char *s;
+int **pp;
+struct foo *fp;
+
+*p;              // OK: int* → int
+*s;              // OK: char* → char
+**pp;            // OK: int** → int* → int
+*fp;             // OK: struct foo* → struct foo
+(*fp).x;         // OK: 구조체 멤버 접근
+```
+
+**에러 케이스:**
+```c
+int a;
+char b;
+int arr[10];
+
+*a;              // ERROR: int는 포인터 아님
+*b;              // ERROR: char는 포인터 아님
+*arr;            // ERROR: 배열은 포인터 아님 (C에서는 decay, SubC는 NO)
+```
+
+**구현 포인트:**
+- 피연산자 타입이 TYPE_POINTER인지 확인
+- 결과 타입은 ptrTo 필드의 타입
+- 결과는 lvalue (메모리 위치 가리킴)
+
+
+3.9 Address-of Operator (unary &)
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:** "cannot take the address of an rvalue"
+
+**검사 규칙:**
+피연산자는 반드시 variable이어야 함
+
+**결과 타입:**
+피연산자 타입의 포인터
+예: int → int*, char → char*, struct foo → struct foo*
+
+**이론적 배경:**
+주소 연산자는 메모리에 저장된 변수의 주소를 가져옵니다. 메모리 위치가
+없는 표현식(rvalue)에는 적용할 수 없습니다.
+
+**SubC의 특이사항:**
+- 배열의 주소(&arr)는 불가 (C 표준은 가능, 타입이 다름)
+- 포인터 변수의 주소(&p)도 불가 (스펙상)
+
+**정상 케이스:**
+```c
+int a;
+char b;
+struct foo { int x; } s;
+int *p;
+
+&a;              // OK: int → int*
+&b;              // OK: char → char*
+&s;              // OK: struct foo → struct foo*
+```
+
+**에러 케이스:**
+```c
+int a;
+int *p;
+int arr[10];
+
+&5;              // ERROR: 상수는 rvalue
+&(a + 1);        // ERROR: 표현식 결과는 rvalue
+&(a++);          // ERROR: rvalue
+&*p;             // ERROR: *p는 variable이 아님 (복합 표현식)
+&arr;            // ERROR: 배열은 rvalue로 간주 (SubC)
+&arr[0];         // OK: 배열 원소는 lvalue
+
+// 포인터 변수의 주소 (스펙에 따라)
+int *p;
+&p;              // ERROR (스펙상 불가)
+```
+
+**"variable"의 정의:**
+SubC에서 variable은:
+- 변수 선언으로 만들어진 식별자
+- 복합 표현식 (*, [], ., ->)의 결과는 variable이 아님
+
+**구현 포인트:**
+- 피연산자가 단순 변수 ID인지 확인
+- 결과 타입은 피연산자 타입의 포인터
+- 결과는 rvalue (포인터 값 자체)
+
+
+3.10 Member Access Operators (., ->)
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:**
+1. "member reference base type is not a struct"
+2. "member reference base type is not a struct pointer"
+3. "no such member in struct"
+
+**검사 규칙:**
+1. **.**: 좌측은 struct 타입, 우측은 해당 struct의 멤버
+2. **->**: 좌측은 struct pointer 타입, 우측은 해당 struct의 멤버
+
+**결과 타입:** 멤버의 타입
+
+**이론적 배경:**
+구조체는 여러 멤버를 가진 복합 타입입니다. 멤버 접근 연산자는
+구조체의 특정 멤버를 선택합니다.
+
+**정상 케이스:**
+```c
+struct foo {
+    int i;
+    char c;
+    int *p;
+};
+
+struct foo s;
+struct foo *ps;
+
+s.i;             // OK: struct . member → int
+s.c;             // OK: → char
+s.p;             // OK: → int*
+
+ps->i;           // OK: struct* -> member → int
+ps->c;           // OK
+ps->p;           // OK
+(*ps).i;         // OK: *ps는 struct foo, .i는 int
+```
+
+**에러 케이스:**
+```c
+struct foo { int i; char c; };
+struct bar { int x; };
+
+struct foo s;
+struct foo *ps;
+int a;
+int *p;
+
+a.i;             // ERROR: not a struct
+p->i;            // ERROR: not a struct pointer (일반 포인터)
+s->i;            // ERROR: not a struct pointer (. 사용해야 함)
+ps.i;            // ERROR: not a struct (-> 사용해야 함)
+
+s.x;             // ERROR: no such member (foo에는 x 없음)
+s.i2;            // ERROR: no such member
+```
+
+**중첩 구조체:**
+```c
+struct inner { int x; };
+struct outer {
+    struct inner in;
+    struct inner *pin;
+};
+
+struct outer o;
+
+o.in;            // OK: struct inner
+o.in.x;          // OK: int
+o.pin->x;        // OK: int
+```
+
+**구현 포인트:**
+- . 연산자: 좌측 타입이 TYPE_STRUCT인지 확인
+- -> 연산자: 좌측 타입이 TYPE_POINTER이고 ptrTo가 TYPE_STRUCT인지 확인
+- 구조체 정의에서 멤버 목록 검색
+- 결과는 lvalue
+
+
+3.11 Subscript Operator ([])
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:**
+1. "subscripted value is not an array"
+2. "array subscript is not an integer"
+
+**검사 규칙:**
+1. A[i]에서 A는 배열 타입
+2. i는 int 타입 (char 불가!)
+
+**결과 타입:** 배열의 원소 타입
+
+**이론적 배경:**
+배열 첨자 연산은 배열의 특정 원소를 선택합니다. 첨자는 정수여야 합니다.
+
+**정상 케이스:**
+```c
+int arr[10];
+char carr[20];
+int i, j;
+
+arr[5];          // OK: int 배열 → int
+arr[i];          // OK: 변수 인덱스
+carr[j];         // OK: char 배열 → char
+arr[i + j];      // OK: 표현식 인덱스 (타입이 int면 OK)
+```
+
+**에러 케이스:**
+```c
+int arr[10];
+char carr[20];
+int a;
+char c;
+int *p;
+
+a[0];            // ERROR: not an array
+p[0];            // ERROR: pointer는 array 아님 (C는 OK, SubC는 NO)
+
+arr[c];          // ERROR: char는 integer 아님
+arr[1.5];        // 입력으로 들어오지 않음 (float 없음)
+```
+
+**다차원 배열:**
+```c
+int matrix[10][20];
+
+matrix[0];       // OK: int[20] (배열)
+matrix[0][0];    // OK: int
+```
+
+**구현 포인트:**
+- 좌측 피연산자 타입이 TYPE_ARRAY인지 확인
+- 우측 피연산자 타입이 TYPE_INT인지 확인 (char 불가!)
+- 결과 타입은 배열의 elemType
+- 결과는 lvalue
+
+
+3.12 Structure & Structure Pointer Declarations
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:** "incomplete type"
+
+**검사 규칙:**
+1. 구조체 타입은 항상 global scope로 간주
+2. 구조체 포인터 선언 시 구조체가 이미 정의되어 있어야 함
+3. 구조체는 재정의 불가
+
+**이론적 배경:**
+SubC는 구조체를 단순화하기 위해 모든 구조체를 전역으로 취급합니다.
+이는 C/C++ 표준과 다릅니다.
+
+**C 표준 vs SubC:**
+```c
+// C 표준: 이것이 가능
+int func() {
+    struct local { int x; };  // 지역 구조체
+    struct local s;
+}
+
+// SubC: 이것은 에러
+int func() {
+    struct local { int x; };  // ERROR: 구조체는 전역만 가능
+}
+```
+
+**정상 케이스:**
+```c
+struct foo {
+    int x;
+    char y;
+};
+
+struct foo s;        // OK
+struct foo *p;       // OK
+
+struct bar {
+    struct foo f;    // OK: foo는 이미 정의됨
+    struct foo *pf;  // OK
+};
+```
+
+**에러 케이스:**
+```c
+struct foo {
+    struct bar b;    // ERROR: incomplete type (bar 미정의)
+    struct bar *pb;  // ERROR: incomplete type
+};
+
+struct bar { int x; };
+struct bar { int y; };   // ERROR: redeclaration
+
+int func() {
+    struct local { int x; };  // ERROR: 암묵적 (구현 방식에 따라)
+    {
+        struct local { int y; };  // ERROR: redeclaration
+    }
+}
+```
+
+**중첩 구조체 정의:**
+```c
+struct outer {
+    struct inner {   // OK: 중첩 정의
+        int x;
+    } i;
+};
+
+struct inner s;      // OK: inner는 이제 전역 타입
+struct inner { };    // ERROR: redeclaration
+```
+
+**Forward Declaration:**
+SubC는 forward declaration을 지원하지 않습니다.
+```c
+struct foo;          // 입력으로 들어오지 않음
+struct foo *p;       // foo가 정의되어야 함
+```
+
+**구현 포인트:**
+- 구조체 정의는 전역 Symbol Table에 등록
+- 구조체 포인터 선언 시 전역 Symbol Table 검색
+- 스코프 무시 (모든 구조체는 전역)
+
+
+3.13 Function Declarations
+────────────────────────────────────────────────────────────────────────
+
+**에러 메시지:**
+1. "incompatible return types"
+2. "incompatible arguments in function call"
+3. "not a function"
+
+**검사 항목:**
+
+1. **Return Type Check:**
+   - 함수의 선언된 반환 타입과 return 문의 타입이 정확히 일치
+
+2. **Function Call Argument Check:**
+   - 인자 개수 일치
+   - 각 인자의 타입이 정확히 일치
+
+3. **Function Call Check:**
+   - 호출하려는 것이 실제로 함수인지
+
+**이론적 배경:**
+함수는 입력(매개변수)과 출력(반환값)의 계약(contract)을 정의합니다.
+호출 시 이 계약을 준수해야 합니다.
+
+**가정사항:**
+- 모든 함수는 return 문을 가짐 (void 함수도)
+- 재귀 함수 없음
+- 함수 오버로딩 없음
+
+**정상 케이스:**
+```c
+int func1(int a, char b) {
+    return 0;        // OK: return type is int
+}
+
+char func2(int x) {
+    return 'a';      // OK: return type is char
+}
+
+void func3() {
+    return;          // OK: void 함수
+}
+
+int* func4(int *p) {
+    return p;        // OK: return type is int*
+}
+
+int main() {
+    int a;
+    char c;
+    int *p;
+
+    func1(a, c);     // OK: 타입 일치
+    c = func2(a);    // OK
+    func3();         // OK
+    p = func4(p);    // OK
+}
+```
+
+**에러 케이스:**
+```c
+// Return type mismatch
+int func1() {
+    return 'a';      // ERROR: incompatible return types (char vs int)
+}
+
+char func2() {
+    return 0;        // ERROR: incompatible return types (int vs char)
+}
+
+int* func3() {
+    int a;
+    return &a;       // OK: int* 타입 일치 (dangling pointer는 semantic에서 안 잡음)
+}
+
+// Argument mismatch
+int add(int a, int b) { return a + b; }
+
+int main() {
+    int x;
+    char y;
+
+    add(x, y);       // ERROR: incompatible arguments (2번째 인자)
+    add(x);          // ERROR: incompatible arguments (개수 불일치)
+    add(x, x, x);    // ERROR: incompatible arguments (개수 불일치)
+}
+
+// Not a function
+int main() {
+    int a;
+    a();             // ERROR: not a function
+}
+```
+
+**함수 포인터:**
+SubC는 함수 포인터를 지원하지 않으므로 관련 테스트 없음.
+
+**구현 포인트:**
+- 함수 심볼에 반환 타입과 매개변수 목록 저장
+- return 문에서 반환 타입 체크
+- 함수 호출 시 인자 개수 및 타입 체크
+- 타입은 정확히 일치해야 함 (no coercion)
+
+
+================================================================================
+PART 4: 기존 코드 완전 분석
+================================================================================
+
+4.1 subc.h 분석
+────────────────────────────────────────────────────────────────────────
+
+**파일 경로:** project3/src/subc.h
+
+**현재 코드:**
+```c
+typedef struct id {
+    int tokenType;      // 토큰 타입 (TYPE, ID, INTEGER_CONST 등)
+    char *name;         // 식별자 이름
+    int count;          // 사용 횟수 (?) - 목적 불명확
+} id;
+
+// Hash table interfaces
+unsigned hash(char *name);
+id *enter(int tokenType, char *name, int length);
+
+// Error message printing procedures
+void error_preamble(void);
+void error_undeclared(void);
+void error_redeclaration(void);
+void error_assignable(void);
+void error_incompatible(void);
+void error_null(void);
+void error_binary(void);
+void error_unary(void);
+void error_comparable(void);
+void error_indirection(void);
+void error_addressof(void);
+void error_struct(void);
+void error_strurctp(void);
+void error_member(void);
+void error_array(void);
+void error_subscript(void);
+void error_incomplete(void);
+void error_return(void);
+void error_function(void);
+void error_arguments(void);
+```
+
+**분석:**
+
+1. **id 구조체:**
+   - 매우 단순한 구조
+   - Lexer에서 사용하는 토큰 정보만 저장
+   - **확장 필요**: 타입 정보, 스코프 정보, 심볼 종류 등
+
+2. **Hash Table 인터페이스:**
+   - `hash()`: 해시 함수 (구현 필요)
+   - `enter()`: 심볼 삽입 (구현 필요)
+   - **추가 필요**: lookup, push_scope, pop_scope 등
+
+3. **에러 함수:**
+   - 15개의 에러 출력 함수
+   - `error_preamble()`만 구현 필요 (TODO로 표시됨)
+   - 나머지는 이미 구현되어 있음 (subc.y에)
+
+**확장 계획:**
+
+```c
+// 심볼 종류
+typedef enum {
+    SYM_VAR,        // 변수
+    SYM_FUNC,       // 함수
+    SYM_STRUCT,     // 구조체
+    SYM_TYPE        // 타입 (typedef용, SubC는 없을 수도)
+} SymbolKind;
+
+// 타입 종류
+typedef enum {
+    TYPE_INT,
+    TYPE_CHAR,
+    TYPE_VOID,
+    TYPE_POINTER,
+    TYPE_ARRAY,
+    TYPE_STRUCT,
+    TYPE_FUNC
+} TypeKind;
+
+// 타입 구조체
+typedef struct Type {
+    TypeKind kind;
+    union {
+        struct Type *ptrTo;
+        struct {
+            struct Type *elemType;
+            int size;
+        } array;
+        struct {
+            char *name;
+            struct FieldList *fields;
+        } structure;
+        struct {
+            struct Type *retType;
+            struct ParamList *params;
+        } function;
+    } data;
+} Type;
+
+// 심볼 구조체
+typedef struct Symbol {
+    char *name;
+    SymbolKind kind;
+    Type *type;
+    int scope;
+    // 함수의 경우
+    struct ParamList *params;
+    Type *retType;
+    // 구조체의 경우
+    struct FieldList *fields;
+} Symbol;
+
+// 필드 목록 (구조체 멤버)
+typedef struct FieldList {
+    char *name;
+    Type *type;
+    struct FieldList *next;
+} FieldList;
+
+// 매개변수 목록
+typedef struct ParamList {
+    char *name;
+    Type *type;
+    struct ParamList *next;
+} ParamList;
+```
+
+
+4.2 subc.l 분석
+────────────────────────────────────────────────────────────────────────
+
+**파일 경로:** project3/src/subc.l
+
+**주요 부분 분석:**
+
+```c
+%{
+#include "subc.h"
+#include "subc.tab.h"
+static int comment_depth = 0;    // 중첩 주석 깊이
+static int lineno = 1;           // 현재 라인 번호
+%}
+
+letter        [A-Za-z_]
+digit         [0-9]
+id            {letter}({letter}|{digit})*
+integer_const ([1-9]{digit}*)|"0"
+whitespace    [ \t]
+special_char  \\[nt]              // \n, \t
+
+%x COMMENT                        // exclusive start condition
+```
+
+**분석:**
+- 중첩 주석 지원 (/* /* */ */)
+- 라인 번호 추적 (get_lineno()로 접근)
+- 정규 표현식으로 토큰 정의
+
+**토큰 처리:**
+
+```c
+"int" | "char"    { return TYPE; }
+"struct"          { return STRUCT; }
+```
+- int와 char를 같은 토큰 TYPE으로 반환
+- 실제 타입 구분은 Parser에서 yytext로 확인 필요
+
+```c
+{id}              {
+                    struct id *entered = enter(ID, yytext, yyleng);
+                    yylval.stringVal = entered->name;
+                    return entered->tokenType;
+                  }
+```
+- 모든 식별자를 hash table에 등록
+- 키워드는 미리 등록되어 있어서 올바른 토큰 타입 반환
+- yylval을 통해 이름 전달
+
+```c
+{integer_const}   {
+                    yylval.intVal = atoi(yytext);
+                    return INTEGER_CONST;
+                  }
+```
+- 정수 값을 intVal로 전달
+
+```c
+\"({special_char}|[^\\\"\n])*\"  {
+                    yylval.stringVal = yytext;
+                    return STRING;
+                  }
+```
+- 문자열 리터럴 (큰따옴표)
+- 특수 문자(\n, \t) 지원
+
+```c
+'({special_char}|[^\\'\n])'      {
+                    yylval.stringVal = yytext;
+                    return CHAR_CONST;
+                  }
+```
+- 문자 상수 (작은따옴표)
+
+**주석 처리:**
+```c
+<INITIAL,COMMENT>"/*"  {
+                    ++comment_depth;
+                    BEGIN (COMMENT);
+                  }
+<COMMENT>"*/"     {
+                    if(--comment_depth == 0)
+                        BEGIN (INITIAL);
+                  }
+<COMMENT>.
+```
+- 중첩 주석 지원
+- COMMENT 상태에서는 모든 문자 무시
+
+**라인 번호:**
+```c
+<*>\n             { ++lineno; }
+
+int get_lineno() {
+    return lineno;
+}
+```
+- 모든 상태(<*>)에서 newline 감지
+- error_preamble()에서 사용
+
+**main 함수:**
+```c
+int main(int argc, char* argv[]) {
+    // Define reserved keywords
+    char *keyword[] = { "int", NULL };
+    int tokentype[] = { TYPE, 0 };
+
+    // Initialize the hash table
+    for(int i=0; keyword[i] != NULL; i++) {
+        enter(tokentype[i], keyword[i], strlen(keyword[i]));
+    }
+
+    // I/O stream settings
+    if (argc >= 2) {
+        yyin = fopen(argv[1], "r");
+    } else {
+        yyin = stdin;
+    }
+
+    if(!yyin) {
+        printf("Can't open input stream!\n");
+        exit(1);
+    }
+
+    yyparse();
+    fclose(yyin);
+
+    return 0;
+}
+```
+
+**분석:**
+- 키워드를 hash table에 미리 등록
+- 현재는 "int"만 등록됨
+- **확장 필요**: "char", "void", "struct", "if", "while", "for", "return" 등
+- argv[1]로 파일 이름 접근 가능 → error_preamble()에서 사용
+- yyparse() 호출로 파싱 시작
+
+**개선점:**
+1. 더 많은 키워드 추가
+2. 연산자 토큰 추가 (현재 일부만 있음)
+
+
+4.3 subc.y 분석
+────────────────────────────────────────────────────────────────────────
+
+**파일 경로:** project3/src/subc.y
+
+**현재 상태:**
+
+```c
+%{
+#include <stdio.h>
+#include <stdlib.h>
+#include "subc.h"
+int yylex();
+int yyerror(char* s);
+
+void reduce(char *s) {
+    printf("%s\n", s);
+}
+%}
+```
+- reduce() 함수: 디버깅용, 프로덕션 이름 출력
+
+**%union:**
+```c
+%union {
+    int   intVal;
+    char  *stringVal;
+}
+```
+- 현재는 단순 값만 전달
+- **확장 필요**: Symbol*, Type*, Node* 등 추가
+
+**토큰 정의:**
+```c
+%token TYPE STRUCT
+%token<stringVal> ID CHAR_CONST STRING
+%token<intVal> INTEGER_CONST
+```
+- TYPE: int 또는 char
+- STRUCT: struct 키워드
+- ID: 식별자
+- CHAR_CONST: 문자 상수
+- STRING: 문자열 리터럴
+- INTEGER_CONST: 정수 상수
+
+**문법 규칙 (현재):**
+```c
+program
+  : ext_def_list
+  {
+    reduce("program->ext_def_list");
+  }
+  ;
+
+ext_def_list
+  : ext_def_list ext_def
+  {
+    reduce("ext_def_list->ext_def_list ext_def");
+  }
+  | %empty
+  {
+    reduce("ext_def_list->epsilon");
+  }
+  ;
+```
+- 매우 기본적인 구조만 있음
+- 대부분의 문법 규칙 추가 필요
+
+**unary 규칙:**
+```c
+unary
+  : INTEGER_CONST { reduce("unary->INTEGER_CONST"); }
+  | CHAR_CONST { reduce("unary->CHAR_CONST"); }
+  | STRING { reduce("unary->STRING"); }
+  | ID { reduce("unary->ID"); }
+  ;
+```
+- 기본 표현식만 정의
+
+**에러 함수들:**
+```c
+void error_preamble(void) {
+    // TODO
+    // Implement this function using get_lineno() function.
+    printf("%s:%d: error: ", "filename", 1234);
+}
+
+void error_undeclared(void) {
+    error_preamble();
+    printf("use of undeclared identifier\n");
+}
+
+// ... (나머지 에러 함수들)
+```
+
+**error_preamble() 구현 필요:**
+```c
+void error_preamble(void) {
+    extern char *filename;  // 파일 이름 저장 변수 필요
+    printf("%s:%d: error: ", filename, get_lineno());
+}
+```
+- filename을 전역 변수로 저장해야 함
+- main()에서 argv[1]을 filename에 저장
+
+**yyerror:**
+```c
+int yyerror(char* s) {
+    printf("syntax error\n");
+    exit(1);
+}
+```
+- Syntax error 시 호출
+- Semantic error와 구분됨
+
+**추가 필요한 문법 규칙:**
+
+1. **External Definitions:**
+   - variable declarations
+   - function definitions
+   - struct definitions
+
+2. **Declarations:**
+   - type specifiers
+   - declarators
+   - parameter lists
+
+3. **Statements:**
+   - compound statement
+   - expression statement
+   - if statement
+   - while statement
+   - for statement
+   - return statement
+
+4. **Expressions:**
+   - assignment
+   - binary operations
+   - unary operations
+   - function calls
+   - array subscript
+   - member access
+   - etc.
+
+
+4.4 hash.c 분석
+────────────────────────────────────────────────────────────────────────
+
+**파일 경로:** project3/src/subc.c
+
+**현재 코드:**
+```c
+#include "subc.h"
+
+#define HASH_TABLE_SIZE 101
+
+typedef struct nlist {
+    struct nlist *next;
+    id *data;
+} nlist;
+
+static nlist *hashTable[HASH_TABLE_SIZE];
+
+id *enter(int tokenType, char *name, int length) {
+    // TODO: Implement this function
+}
+```
+
+**분석:**
+
+1. **Hash Table 구조:**
+   - Separate Chaining 방식
+   - 크기: 101 (소수)
+   - nlist: 연결 리스트 노드
+
+2. **현재 문제점:**
+   - enter() 함수만 선언되고 미구현
+   - lookup, scope 관리 기능 없음
+
+**구현해야 할 기능:**
+
+1. **hash() 함수:**
+```c
+unsigned hash(char *name) {
+    unsigned hashval;
+    for (hashval = 0; *name != '\0'; name++)
+        hashval = *name + 31 * hashval;
+    return hashval % HASH_TABLE_SIZE;
+}
+```
+
+2. **enter() 함수:**
+```c
+id *enter(int tokenType, char *name, int length) {
+    unsigned hashval;
+    nlist *np;
+
+    // 먼저 검색
+    np = lookup(name);
+    if (np != NULL) {
+        // 이미 존재: 토큰 타입 반환 (키워드용)
+        return np->data;
+    }
+
+    // 새로 생성
+    np = (nlist *)malloc(sizeof(nlist));
+    np->data = (id *)malloc(sizeof(id));
+    np->data->name = (char *)malloc(length + 1);
+    strcpy(np->data->name, name);
+    np->data->tokenType = tokenType;
+    np->data->count = 0;
+
+    // 삽입
+    hashval = hash(name);
+    np->next = hashTable[hashval];
+    hashTable[hashval] = np;
+
+    return np->data;
+}
+```
+
+3. **lookup() 함수:**
+```c
+nlist *lookup(char *name) {
+    unsigned hashval = hash(name);
+    nlist *np;
+
+    for (np = hashTable[hashval]; np != NULL; np = np->next) {
+        if (strcmp(np->data->name, name) == 0)
+            return np;
+    }
+    return NULL;
+}
+```
+
+**Scoped Symbol Table로 확장:**
+
+방법 1: Symbol Table Stack
+```c
+#define MAX_SCOPE_DEPTH 100
+
+static nlist *scopeStack[MAX_SCOPE_DEPTH][HASH_TABLE_SIZE];
+static int currentScope = 0;
+
+void push_scope() {
+    currentScope++;
+    // scopeStack[currentScope] 초기화
+    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
+        scopeStack[currentScope][i] = NULL;
+    }
+}
+
+void pop_scope() {
+    // scopeStack[currentScope] 메모리 해제
+    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
+        nlist *np = scopeStack[currentScope][i];
+        while (np != NULL) {
+            nlist *temp = np;
+            np = np->next;
+            free(temp->data->name);
+            free(temp->data);
+            free(temp);
+        }
+        scopeStack[currentScope][i] = NULL;
+    }
+    currentScope--;
+}
+
+Symbol *lookup_current_scope(char *name) {
+    unsigned hashval = hash(name);
+    nlist *np;
+
+    for (np = scopeStack[currentScope][hashval]; np != NULL; np = np->next) {
+        if (strcmp(np->data->name, name) == 0)
+            return (Symbol *)np->data;
+    }
+    return NULL;
+}
+
+Symbol *lookup_all_scopes(char *name) {
+    for (int scope = currentScope; scope >= 0; scope--) {
+        unsigned hashval = hash(name);
+        nlist *np;
+
+        for (np = scopeStack[scope][hashval]; np != NULL; np = np->next) {
+            if (strcmp(np->data->name, name) == 0)
+                return (Symbol *)np->data;
+        }
+    }
+    return NULL;
+}
+```
+
+방법 2: 단일 Hash Table + Scope Level
+```c
+typedef struct Symbol {
+    char *name;
+    SymbolKind kind;
+    Type *type;
+    int scope;
+    struct Symbol *next;  // 같은 이름의 다른 스코프 심볼
+} Symbol;
+
+static int currentScope = 0;
+
+void push_scope() {
+    currentScope++;
+}
+
+void pop_scope() {
+    // 현재 스코프의 모든 심볼을 hash table에서 제거
+    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
+        nlist *np = hashTable[i];
+        nlist *prev = NULL;
+
+        while (np != NULL) {
+            Symbol *sym = (Symbol *)np->data;
+            if (sym->scope == currentScope) {
+                // 제거
+                if (prev == NULL) {
+                    hashTable[i] = np->next;
+                    free(np);
+                    np = hashTable[i];
+                } else {
+                    prev->next = np->next;
+                    free(np);
+                    np = prev->next;
+                }
+            } else {
+                prev = np;
+                np = np->next;
+            }
+        }
+    }
+    currentScope--;
+}
+```
+
+
+4.5 Makefile 분석
+────────────────────────────────────────────────────────────────────────
+
+```makefile
+LEX = flex
+YACC = bison
+YFLAGS = -d
+CC = gcc
+CFLAGS = -g
+LDFLAGS = -lfl
+
+OBJECTS = subc.tab.o lex.yy.o hash.o
+
+all: subc
+
+subc: $(OBJECTS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $(OBJECTS) -o subc
+
+lex.yy.o: lex.yy.c subc.tab.h
+subc.tab.o: subc.tab.c
+lex.yy.c: subc.l
+	$(LEX) $(LFLAGS) subc.l
+subc.tab.h subc.tab.c: subc.y
+	$(YACC) $(YFLAGS) subc.y
+
+clean:
+	rm -f subc lex.yy.c subc.tab.c subc.tab.h *.o
+```
+
+**빌드 프로세스:**
+1. subc.y → bison -d → subc.tab.c, subc.tab.h
+2. subc.l → flex → lex.yy.c
+3. gcc -c → subc.tab.o, lex.yy.o, hash.o
+4. gcc -lfl → subc
+
+**-d 플래그:**
+- Header 파일 (subc.tab.h) 생성
+- 토큰 정의 포함
+- Lexer에서 include
+
+**-lfl 플래그:**
+- Flex 라이브러리 링크
+- yywrap() 등의 함수 제공
+
+
+================================================================================
+PART 5: 구현 가이드
+================================================================================
+
+5.1 데이터 구조 설계 완전 가이드
+────────────────────────────────────────────────────────────────────────
+
+**Step 1: 타입 시스템 구조체**
+
+subc.h에 추가:
+
+```c
+// 타입 종류
+typedef enum {
+    TYPE_INT,
+    TYPE_CHAR,
+    TYPE_VOID,
+    TYPE_POINTER,
+    TYPE_ARRAY,
+    TYPE_STRUCT,
+    TYPE_FUNC
+} TypeKind;
+
+// 필드 목록 (구조체 멤버)
+typedef struct FieldList {
+    char *name;
+    struct Type *type;
+    struct FieldList *next;
+} FieldList;
+
+// 매개변수 목록
+typedef struct ParamList {
+    char *name;
+    struct Type *type;
+    struct ParamList *next;
+} ParamList;
+
+// 타입 구조체
+typedef struct Type {
+    TypeKind kind;
+    union {
+        struct Type *ptrTo;              // TYPE_POINTER
+        struct {
+            struct Type *elemType;
+            int size;
+        } array;                         // TYPE_ARRAY
+        struct {
+            char *name;
+            FieldList *fields;
+        } structure;                     // TYPE_STRUCT
+        struct {
+            struct Type *retType;
+            ParamList *params;
+        } function;                      // TYPE_FUNC
+    } data;
+} Type;
+```
+
+**Step 2: 심볼 구조체**
+
+```c
+typedef enum {
+    SYM_VAR,
+    SYM_FUNC,
+    SYM_STRUCT
+} SymbolKind;
+
+typedef struct Symbol {
+    char *name;
+    SymbolKind kind;
+    Type *type;
+    int scope;
+} Symbol;
+```
+
+**Step 3: AST 노드 (표현식용)**
+
+```c
+typedef struct Node {
+    Type *type;
+    int isLvalue;       // lvalue 여부
+    int isVariable;     // variable 여부 (& 연산자용)
+    // 추가 필드...
+} Node;
+```
+
+
+5.2 Symbol Table 구현 전략
+────────────────────────────────────────────────────────────────────────
+
+**전략: Symbol Table Stack**
+
+장점:
+- 스코프 관리 명확
+- pop_scope 시 자동 정리
+
+단점:
+- 검색 시 여러 테이블 탐색 필요
+
+**핵심 함수:**
+
+```c
+// 스코프 관리
+void push_scope();
+void pop_scope();
+
+// 심볼 삽입
+int insert_symbol(char *name, Symbol *sym);
+
+// 심볼 검색
+Symbol *lookup_current_scope(char *name);
+Symbol *lookup_all_scopes(char *name);
+
+// 구조체 전용 (전역만)
+int insert_struct(char *name, Type *type);
+Type *lookup_struct(char *name);
+
+// 함수 전용 (전역만)
+int insert_function(char *name, Symbol *sym);
+Symbol *lookup_function(char *name);
+```
+
+**구현 세부사항:**
+
+```c
+#define MAX_SCOPE 100
+
+static nlist *scopeStack[MAX_SCOPE][HASH_TABLE_SIZE];
+static int currentScope = 0;
+
+// 전역 구조체 및 함수용
+static nlist *globalStructs[HASH_TABLE_SIZE];
+static nlist *globalFuncs[HASH_TABLE_SIZE];
+
+void push_scope() {
+    currentScope++;
+    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
+        scopeStack[currentScope][i] = NULL;
+    }
+}
+
+void pop_scope() {
+    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
+        nlist *np = scopeStack[currentScope][i];
+        while (np != NULL) {
+            nlist *temp = np;
+            np = np->next;
+            // 메모리 해제
+            free(temp);
+        }
+        scopeStack[currentScope][i] = NULL;
+    }
+    currentScope--;
+}
+
+int insert_symbol(char *name, Symbol *sym) {
+    // 현재 스코프에서 중복 검사
+    if (lookup_current_scope(name) != NULL) {
+        return 0;  // 중복
+    }
+
+    unsigned hashval = hash(name);
+    nlist *np = (nlist *)malloc(sizeof(nlist));
+    np->data = (id *)sym;  // Symbol은 id의 확장
+    np->next = scopeStack[currentScope][hashval];
+    scopeStack[currentScope][hashval] = np;
+
+    sym->scope = currentScope;
+    return 1;  // 성공
+}
+
+Symbol *lookup_current_scope(char *name) {
+    unsigned hashval = hash(name);
+    nlist *np = scopeStack[currentScope][hashval];
+
+    while (np != NULL) {
+        Symbol *sym = (Symbol *)np->data;
+        if (strcmp(sym->name, name) == 0) {
+            return sym;
+        }
+        np = np->next;
+    }
+    return NULL;
+}
+
+Symbol *lookup_all_scopes(char *name) {
+    for (int scope = currentScope; scope >= 0; scope--) {
+        unsigned hashval = hash(name);
+        nlist *np = scopeStack[scope][hashval];
+
+        while (np != NULL) {
+            Symbol *sym = (Symbol *)np->data;
+            if (strcmp(sym->name, name) == 0) {
+                return sym;
+            }
+            np = np->next;
+        }
+    }
+    return NULL;
+}
+
+Type *lookup_struct(char *name) {
+    unsigned hashval = hash(name);
+    nlist *np = globalStructs[hashval];
+
+    while (np != NULL) {
+        Type *type = (Type *)np->data;
+        if (strcmp(type->data.structure.name, name) == 0) {
+            return type;
+        }
+        np = np->next;
+    }
+    return NULL;
+}
+
+int insert_struct(char *name, Type *type) {
+    if (lookup_struct(name) != NULL) {
+        return 0;  // 중복
+    }
+
+    unsigned hashval = hash(name);
+    nlist *np = (nlist *)malloc(sizeof(nlist));
+    np->data = (id *)type;
+    np->next = globalStructs[hashval];
+    globalStructs[hashval] = np;
+
+    return 1;
+}
+```
+
+
+5.3 Bison 액션 코드 작성 패턴
+────────────────────────────────────────────────────────────────────────
+
+**패턴 1: 변수 선언**
+
+```c
+var_decl
+  : type_specifier declarator ';'
+  {
+      if ($2 == NULL) {
+          $$ = NULL;  // declarator에서 에러
+          return;
+      }
+
+      Symbol *sym = (Symbol *)malloc(sizeof(Symbol));
+      sym->name = $2->name;
+      sym->kind = SYM_VAR;
+      sym->type = $2->type;  // declarator가 타입 결정
+
+      if (!insert_symbol(sym->name, sym)) {
+          error_redeclaration();
+          $$ = NULL;
+      } else {
+          $$ = sym;
+      }
+  }
+  ;
+```
+
+**패턴 2: 변수 사용**
+
+```c
+primary_expr
+  : ID
+  {
+      Symbol *sym = lookup_all_scopes($1);
+      if (sym == NULL) {
+          error_undeclared();
+          $$ = NULL;
+      } else {
+          Node *node = (Node *)malloc(sizeof(Node));
+          node->type = sym->type;
+          node->isLvalue = 1;
+          node->isVariable = 1;
+          $$ = node;
+      }
+  }
+  ;
+```
+
+**패턴 3: Binary 연산자**
+
+```c
+additive_expr
+  : multiplicative_expr '+' multiplicative_expr
+  {
+      if ($1 == NULL || $3 == NULL) {
+          $$ = NULL;
+          return;
+      }
+
+      if ($1->type->kind != TYPE_INT || $3->type->kind != TYPE_INT) {
+          error_binary();
+          $$ = NULL;
+      } else {
+          Node *node = (Node *)malloc(sizeof(Node));
+          node->type = make_int_type();
+          node->isLvalue = 0;
+          $$ = node;
+      }
+  }
+  ;
+```
+
+**패턴 4: Assignment**
+
+```c
+assignment_expr
+  : unary_expr '=' assignment_expr
+  {
+      if ($1 == NULL || $3 == NULL) {
+          $$ = NULL;
+          return;
+      }
+
+      // 1. lvalue 체크
+      if (!$1->isLvalue) {
+          error_assignable();
+          $$ = NULL;
+          return;
+      }
+
+      // 2. NULL 체크
+      if ($3->isNull && !is_pointer_type($1->type)) {
+          error_null();
+          $$ = NULL;
+          return;
+      }
+
+      // 3. 타입 체크
+      if (!is_same_type($1->type, $3->type)) {
+          error_incompatible();
+          $$ = NULL;
+          return;
+      }
+
+      $$ = $1;  // 결과는 LHS
+  }
+  ;
+```
+
+**패턴 5: 스코프 관리**
+
+```c
+compound_stmt
+  : '{' { push_scope(); } local_decls stmt_list '}'
+  {
+      pop_scope();
+      $$ = make_compound_stmt($3, $4);
+  }
+  ;
+```
+
+**패턴 6: Midrule Actions**
+
+```c
+function_def
+  : type_specifier ID '(' { push_scope(); } params ')' compound_stmt
+  {
+      pop_scope();
+      // 함수 등록
+  }
+  ;
+```
+
+
+5.4 타입 검사 헬퍼 함수
+────────────────────────────────────────────────────────────────────────
+
+**기본 타입 생성:**
+
+```c
+Type *make_int_type() {
+    Type *t = (Type *)malloc(sizeof(Type));
+    t->kind = TYPE_INT;
+    return t;
+}
+
+Type *make_char_type() {
+    Type *t = (Type *)malloc(sizeof(Type));
+    t->kind = TYPE_CHAR;
+    return t;
+}
+
+Type *make_void_type() {
+    Type *t = (Type *)malloc(sizeof(Type));
+    t->kind = TYPE_VOID;
+    return t;
+}
+
+Type *make_pointer_type(Type *base) {
+    Type *t = (Type *)malloc(sizeof(Type));
+    t->kind = TYPE_POINTER;
+    t->data.ptrTo = base;
+    return t;
+}
+
+Type *make_array_type(Type *elem, int size) {
+    Type *t = (Type *)malloc(sizeof(Type));
+    t->kind = TYPE_ARRAY;
+    t->data.array.elemType = elem;
+    t->data.array.size = size;
+    return t;
+}
+```
+
+**타입 비교:**
+
+```c
+int is_same_type(Type *t1, Type *t2) {
+    if (t1 == NULL || t2 == NULL) return 0;
+    if (t1->kind != t2->kind) return 0;
+
+    switch (t1->kind) {
+        case TYPE_INT:
+        case TYPE_CHAR:
+        case TYPE_VOID:
+            return 1;
+
+        case TYPE_POINTER:
+            return is_same_type(t1->data.ptrTo, t2->data.ptrTo);
+
+        case TYPE_ARRAY:
+            return is_same_type(t1->data.array.elemType,
+                               t2->data.array.elemType);
+
+        case TYPE_STRUCT:
+            return strcmp(t1->data.structure.name,
+                         t2->data.structure.name) == 0;
+
+        case TYPE_FUNC:
+            // 함수 타입 비교 (반환 타입 + 매개변수)
+            if (!is_same_type(t1->data.function.retType,
+                             t2->data.function.retType))
+                return 0;
+            return is_same_param_list(t1->data.function.params,
+                                     t2->data.function.params);
+    }
+    return 0;
+}
+```
+
+**타입 판별:**
+
+```c
+int is_pointer_type(Type *t) {
+    return t != NULL && t->kind == TYPE_POINTER;
+}
+
+int is_array_type(Type *t) {
+    return t != NULL && t->kind == TYPE_ARRAY;
+}
+
+int is_struct_type(Type *t) {
+    return t != NULL && t->kind == TYPE_STRUCT;
+}
+
+int is_integer_type(Type *t) {
+    return t != NULL && t->kind == TYPE_INT;
+}
+
+int is_char_type(Type *t) {
+    return t != NULL && t->kind == TYPE_CHAR;
+}
+
+int is_struct_pointer_type(Type *t) {
+    return is_pointer_type(t) && is_struct_type(t->data.ptrTo);
+}
+```
+
+
+5.5 에러 복구 메커니즘
+────────────────────────────────────────────────────────────────────────
+
+**원칙:**
+1. 에러 발견 시 즉시 출력
+2. NULL 반환하여 후속 에러 방지
+3. 파싱은 계속 진행
+
+**예제:**
+
+```c
+expr
+  : expr '+' expr
+  {
+      // NULL 체크로 이미 에러 발생한 경우 스킵
+      if ($1 == NULL || $3 == NULL) {
+          $$ = NULL;
+          return;
+      }
+
+      // 타입 검사
+      if ($1->type->kind != TYPE_INT || $3->type->kind != TYPE_INT) {
+          error_binary();
+          $$ = NULL;  // NULL 반환으로 후속 에러 방지
+          return;
+      }
+
+      // 정상 처리
+      Node *node = (Node *)malloc(sizeof(Node));
+      node->type = make_int_type();
+      $$ = node;
+  }
+  ;
+```
+
+**Multiple Errors on Same Line:**
+
+같은 라인에 여러 에러가 있을 수 있지만, **첫 번째 에러만 출력**합니다.
+이는 reduce 순서에 의해 자연스럽게 처리됩니다.
+
+```c
+// func = a[1];
+// 두 에러: lvalue is not assignable, subscripted value is not an array
+
+// Reduce 순서:
+// 1. a[1] reduce → subscript 에러 발견, 출력, NULL 반환
+// 2. func = NULL reduce → LHS 체크는 OK, RHS가 NULL이므로 에러 출력 안 함
+```
+
+
+5.6 전역 변수 관리
+────────────────────────────────────────────────────────────────────────
+
+**필요한 전역 변수:**
+
+```c
+// subc.y에 추가
+char *filename = NULL;      // 입력 파일 이름
+Symbol *currentFunction = NULL;  // 현재 함수 (return 타입 체크용)
+```
+
+**subc.l의 main()에서 설정:**
+
+```c
+int main(int argc, char* argv[]) {
+    extern char *filename;
+
+    // ... 키워드 초기화 ...
+
+    if (argc >= 2) {
+        filename = argv[1];
+        yyin = fopen(argv[1], "r");
+    } else {
+        filename = "<stdin>";
+        yyin = stdin;
+    }
+
+    // ...
+}
+```
+
+**error_preamble() 구현:**
+
+```c
+void error_preamble(void) {
+    extern char *filename;
+    extern int get_lineno(void);
+    printf("%s:%d: error: ", filename, get_lineno());
+}
+```
+
+
+================================================================================
+PART 6: 테스트 케이스 분석
+================================================================================
+
+6.1 var_def.c
+────────────────────────────────────────────────────────────────────────
+
+**코드:**
+```c
+/* variable redefine */
+int a;
+
+int main() {
+    int a;
+    char a; /* error */
+    int b;
+    int b;  /* error */
+    int c;
+    char d;
+
+    a = b;
+    a = e;	/* error */
+
+    return 0;
+}
+```
+
+**테스트 내용:**
+1. 전역 변수 a
+2. 지역 변수 a (shadowing, OK)
+3. 재선언 a (ERROR: redeclaration)
+4. 재선언 b (ERROR: redeclaration)
+5. 미선언 변수 e 사용 (ERROR: use of undeclared identifier)
+
+**예상 출력:**
+```
+var_def.c:6: error: redeclaration
+var_def.c:8: error: redeclaration
+var_def.c:12: error: use of undeclared identifier
+```
+
+
+6.2 func_op.c
+────────────────────────────────────────────────────────────────────────
+
+**코드 일부:**
+```c
+int func1(int a, char b) { return 0; }
+char func2() { return 'a'; }
+int * func3(int *a, int b) {
+    int *c;
+    *c = *a + b;
+    return c;
+}
+int func4() { return 'a'; /* error */ }
+```
+
+**테스트 내용:**
+1. 함수 선언 및 정의
+2. 반환 타입 체크: func4는 int를 반환해야 하는데 char 반환 (ERROR)
+3. 함수 호출 인자 체크
+
+**예상 에러:**
+- func4의 return 'a': incompatible return types
+
+
+6.3 ptr_op.c
+────────────────────────────────────────────────────────────────────────
+
+**주요 테스트:**
+```c
+int *b;
+int a[10];
+
+b = &a;		    /* error: array의 주소 */
+b = &a[10];     /* OK */
+b = &b;		    /* error: 포인터 변수의 주소 */
+b = &*(a+5);    /* error: 복합 표현식 */
+b = &(b++);	    /* error: rvalue */
+```
+
+**테스트 내용:**
+- & 연산자는 variable만 허용
+- 배열, 포인터 변수, 복합 표현식 모두 불가
+
+
+6.4 str_op.c
+────────────────────────────────────────────────────────────────────────
+
+**주요 테스트:**
+```c
+struct str1 {
+    int i;
+    char c;
+};
+
+struct str2 {
+    int *i;
+    char *c;
+    struct str3 {
+        int *i;
+        char *c;
+    } st;
+};
+
+struct str3 { /* error: redeclaration */
+    int *i;
+    char *c;
+};
+```
+
+**테스트 내용:**
+1. 구조체 정의
+2. 중첩 구조체 정의
+3. 구조체 재정의 (ERROR: 중첩 정의로 이미 전역에 등록됨)
+4. 멤버 접근 (., ->)
+5. 타입 불일치 에러
+
+
+================================================================================
+PART 7: 구현 전략 및 팁
+================================================================================
+
+7.1 단계별 구현 전략
+────────────────────────────────────────────────────────────────────────
+
+**Phase 1: 기반 구조 (2-3일)**
+1. subc.h에 타입 및 심볼 구조체 추가
+2. hash.c에 Symbol Table 구현
+3. error_preamble() 구현
+4. 타입 생성 및 비교 함수 구현
+
+**Phase 2: 기본 문법 (2-3일)**
+5. subc.y에 기본 문법 규칙 추가
+   - declarations (변수, 함수)
+   - statements (compound, expr, if, while, for, return)
+   - expressions (basic)
+6. %union 확장
+
+**Phase 3: 변수 및 기본 연산자 (2일)**
+7. 변수 선언 및 사용 체크
+8. Binary/Unary 연산자 체크
+9. Assignment 연산자 체크
+
+**Phase 4: 구조체 및 포인터 (2일)**
+10. 구조체 선언 및 멤버 접근
+11. 포인터 연산자 (*, &)
+12. 배열 첨자 연산자
+
+**Phase 5: 함수 (2일)**
+13. 함수 선언 및 정의
+14. 함수 호출 및 인자 체크
+15. Return 타입 체크
+
+**Phase 6: 테스트 및 디버깅 (2-3일)**
+16. 각 테스트 케이스 실행
+17. 에러 메시지 형식 확인
+18. Edge cases 처리
+
+
+7.2 디버깅 팁
+────────────────────────────────────────────────────────────────────────
+
+**1. Segmentation Fault:**
+- NULL 포인터 역참조가 주원인
+- 모든 포인터 사용 전 NULL 체크
+- Symbol table lookup 결과 항상 체크
+
+**2. 타입 검사 함수:**
+- is_same_type, is_pointer_type 등 헬퍼 함수 먼저 구현
+- 디버깅 출력 추가:
+  ```c
+  void print_type(Type *t) {
+      if (t == NULL) {
+          printf("NULL");
+          return;
+      }
+      switch (t->kind) {
+          case TYPE_INT: printf("int"); break;
+          case TYPE_CHAR: printf("char"); break;
+          case TYPE_POINTER:
+              printf("pointer to ");
+              print_type(t->data.ptrTo);
+              break;
+          // ...
+      }
+  }
+  ```
+
+**3. Reduce 디버깅:**
+- reduce() 함수 활용하여 프로덕션 추적
+- 어느 규칙이 적용되는지 확인
+
+**4. Symbol Table 디버깅:**
+```c
+void print_symbol_table() {
+    printf("=== Symbol Table (Scope %d) ===\n", currentScope);
+    for (int i = 0; i < HASH_TABLE_SIZE; i++) {
+        nlist *np = scopeStack[currentScope][i];
+        while (np != NULL) {
+            Symbol *sym = (Symbol *)np->data;
+            printf("%s: ", sym->name);
+            print_type(sym->type);
+            printf("\n");
+            np = np->next;
+        }
+    }
+}
+```
+
+
+7.3 주의사항
+────────────────────────────────────────────────────────────────────────
+
+**1. 메모리 관리:**
+- malloc으로 할당한 메모리 추적
+- 프로젝트 특성상 메모리 누수는 큰 문제 아님 (프로그램 종료 시 OS가 회수)
+- 하지만 pop_scope에서는 정리 권장
+
+**2. 문자열 처리:**
+- strdup() 사용하여 문자열 복사
+- strcmp() 사용하여 비교
+- yytext는 덮어쓰여지므로 즉시 복사
+
+**3. Bison Conflicts:**
+- shift/reduce, reduce/reduce conflict 최소화
+- %left, %right, %nonassoc으로 우선순위 지정
+
+**4. 에러 메시지 형식:**
+- 정확히 "<filename>:<line>: error: <message>" 형식
+- 공백 하나도 틀리면 안 됨 (자동 채점)
+
+**5. NULL 처리:**
+- 모든 액션에서 NULL 체크
+- NULL 발견 시 즉시 NULL 반환
+
+
+7.4 테스트 전략
+────────────────────────────────────────────────────────────────────────
+
+**1. 단위 테스트:**
+각 semantic check를 개별적으로 테스트하는 작은 파일 작성
+
+```c
+// test_undeclared.c
+int main() {
+    a = 5;  // error
+}
+```
+
+**2. 통합 테스트:**
+제공된 테스트 케이스 사용
+
+**3. 출력 비교:**
+```bash
+./subc test.c > output.txt
+diff output.txt expected.txt
+```
+
+**4. Valgrind (선택사항):**
+```bash
+valgrind --leak-check=full ./subc test.c
+```
+
+
+7.5 시간 관리
+────────────────────────────────────────────────────────────────────────
+
+**총 소요 시간 예상: 12-15일**
+
+**일정:**
+- Day 1-3: 기반 구조
+- Day 4-6: 기본 문법
+- Day 7-8: 변수 및 연산자
+- Day 9-10: 구조체 및 포인터
+- Day 11-12: 함수
+- Day 13-15: 테스트 및 디버깅
+
+**마감 3일 전까지 기본 구현 완료 권장**
+
+
+================================================================================
+마무리
+================================================================================
+
+이 보고서는 Project 3의 모든 측면을 상세히 다루었습니다.
+
+**핵심 요약:**
+1. Semantic Analyzer 구현이 목표
+2. Scoped Symbol Table이 핵심
+3. 15가지 semantic checks 모두 구현
+4. 에러 복구 메커니즘 필수
+5. 정확한 에러 메시지 형식 준수
+
+**성공을 위한 조언:**
+1. 일찍 시작하기
+2. 데이터 구조를 먼저 완벽히 설계
+3. 단계적으로 구현 및 테스트
+4. TA에게 적극적으로 질문
+
+**연락처:**
+TA: 주동욱 (donguk.red@snu.ac.kr)
+
+**마감일: November 30, 2025**
+
+Good luck!
+
+================================================================================
