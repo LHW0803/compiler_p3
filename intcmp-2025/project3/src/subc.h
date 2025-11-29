@@ -66,11 +66,12 @@ id *enter(int tokenType, char *name, int length);
 
 // Symbol table interfaces
 void push_scope(void);
-void pop_scope(void);
+struct ste* pop_scope(void);  /* void → struct ste* */
 struct decl* lookup(struct id *name);
 struct ste* declare(struct id *name, struct decl *decl);
 struct decl* findcurrentdecl(struct id *name);
 int check_is_type(struct decl *decl);
+int check_is_struct_type(struct decl *decl);  /* 추가 */
 
 // Declaration construction helpers
 struct decl* maketypedecl(int typeclass);
@@ -78,6 +79,7 @@ struct decl* makevardecl(struct decl *type);
 struct decl* makeptrdecl(struct decl *type);
 struct decl* makearraydecl(int size, struct decl *elementvar);
 struct decl* makeconstdecl(struct decl *type);
+struct decl* makestructdecl(struct ste *fields);  /* 추가 */
 void init_type(void);
 
 // Global built-in types

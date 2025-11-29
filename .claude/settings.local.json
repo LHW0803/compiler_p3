@@ -6,7 +6,9 @@
       "Bash(gcc:*)",
       "Bash(make:*)",
       "Bash(docker --version:*)",
-      "Bash(docker run:*)"
+      "Bash(docker run:*)",
+      "Bash(docker cp:*)",
+      "Bash(docker exec:*)"
     ],
     "deny": [],
     "ask": []

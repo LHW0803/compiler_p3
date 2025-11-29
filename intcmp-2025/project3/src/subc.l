@@ -36,7 +36,7 @@ special_char  \\[nt]
 
   /* Keywords */
   /* Add more Keyworks */
-"int"|"char"                    { return TYPE; }
+  /* "int"|"char"                    { return TYPE; }  */  /* Phase 2: TYPE 토큰 제거 */
 "struct"                        { return STRUCT; }
 "NULL"                          { return SYM_NULL; }
 "return"                        { return RETURN; }
@@ -50,8 +50,8 @@ special_char  \\[nt]
   /* Identifiers */
 {id}                            {
                                   struct id *entered  = enter(ID, yytext, yyleng);
-                                  yylval.stringVal = entered->name;
-                                  return entered->tokenType;
+                                  yylval.idptr = entered;
+                                  return ID;
                                 }
 
   /* Integer constants */

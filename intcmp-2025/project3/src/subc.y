@@ -26,15 +26,22 @@ char* filename;
 %union {
   int   intVal;
   char  *stringVal;
+  struct id *idptr;      /* Phase 2: ID용 추가 */
+  struct decl *declptr;  /* Phase 3 준비용 추가 */
 }
 
 /* Tokens and Types */
 /* Add more tokens and types */
-%token            TYPE STRUCT
+%token            STRUCT
 %token            SYM_NULL RETURN IF ELSE WHILE FOR BREAK CONTINUE
 %token            LOGICAL_OR LOGICAL_AND RELOP EQUOP INCOP DECOP STRUCTOP
-%token<stringVal> ID CHAR_CONST STRING
+%token<idptr>     ID
+%token<stringVal> CHAR_CONST STRING
 %token<intVal>    INTEGER_CONST
+
+/* Non-terminal types for Phase 3 */
+%type<declptr>    type_id type_specifier struct_specifier
+%type<intVal>     pointers
 
 /* Precedences and Associativity (low to high) */
 %left ','
@@ -76,10 +83,54 @@ ext_def_list
 ext_def
   : type_specifier pointers ID ';'
   {
+    if ($1 == NULL) {
+      /* type error propagation from Step A */
+    } else {
+      struct decl *basetype = $1;
+      int i;  /* C90 compatibility */
+      
+      /* apply pointer layers */
+      for (i = 0; i < $2; i++) {
+        basetype = makeptrdecl(basetype);
+      }
+      
+      struct decl *vardecl = makevardecl(basetype);
+      
+      /* redeclaration check */
+      if (findcurrentdecl($3) != NULL) {
+        error_redeclaration();
+      } else {
+        declare($3, vardecl);
+      }
+    }
+    /* do not use $$ */
     REDUCE("ext_def->type_specifier pointers ID ';'");
   }
   | type_specifier pointers ID '[' INTEGER_CONST ']' ';'
   {
+    if ($1 == NULL) {
+      /* type error propagation */
+    } else {
+      struct decl *basetype = $1;
+      int i;  /* C90 compatibility */
+      
+      /* apply pointer layers */
+      for (i = 0; i < $2; i++) {
+        basetype = makeptrdecl(basetype);
+      }
+      
+      /* array declaration: CONST(ARRAY(VAR)) */
+      struct decl *elemvar = makevardecl(basetype);
+      struct decl *arraydecl = makearraydecl($5, elemvar);
+      struct decl *constdecl = makeconstdecl(arraydecl);
+      
+      if (findcurrentdecl($3) != NULL) {
+        error_redeclaration();
+      } else {
+        declare($3, constdecl);
+      }
+    }
+    /* do not use $$ */
     REDUCE("ext_def->type_specifier pointers ID '[' INTEGER_CONST ']' ';'");
   }
   | struct_specifier ';'
@@ -92,24 +143,72 @@ ext_def
   }
   ;
 
-type_specifier
-  : TYPE
+type_id
+  : ID
   {
-    REDUCE("type_specifier->TYPE");
+    /* lookup and check if it's a type */
+    struct decl *declptr = lookup($1);
+    
+    if (declptr == NULL) {
+      error_undeclared();
+      $$ = NULL;
+    } else if (!check_is_type(declptr)) {
+      /* not a type declaration */
+      error_undeclared();  /* TODO: may need different error later */
+      $$ = NULL;
+    } else {
+      $$ = declptr;
+    }
+    REDUCE("type_id->ID");
+  }
+  ;
+
+type_specifier
+  : type_id
+  {
+    $$ = $1;  /* propagate type_id result */
+    REDUCE("type_specifier->type_id");
   }
   | struct_specifier
   {
+    $$ = $1;  /* struct_specifier now returns proper declptr */
     REDUCE("type_specifier->struct_specifier");
   }
   ;
 
 struct_specifier
-  : STRUCT ID '{' def_list '}'
+  : STRUCT ID '{'
   {
+    push_scope();  /* 필드 전용 scope */
+  }
+  def_list '}'
+  {
+    struct ste *fields = pop_scope();  /* 필드 리스트 수집 */
+    struct decl *structdecl = makestructdecl(fields);
+    
+    /* struct 재정의 검사 - 현재 scope만 확인 (실용적) */
+    if (findcurrentdecl($2) != NULL) {
+      error_redeclaration();
+      $$ = NULL;
+    } else {
+      /* grammar상 struct 정의는 file-scope에서만 등장하므로 사실상 global */
+      declare($2, structdecl);
+      $$ = structdecl;
+    }
     REDUCE("struct_specifier->STRUCT ID '{' def_list '}'");
   }
   | STRUCT ID
   {
+    /* 타입 사용은 lookup으로 모든 scope 검색 */
+    struct decl *declptr = lookup($2);
+    
+    if (!check_is_struct_type(declptr)) {
+      /* error_incomplete() already called in check_is_struct_type();
+         propagate NULL to type_specifier → ext_def/def → skip declaration */
+      $$ = NULL;
+    } else {
+      $$ = declptr;
+    }
     REDUCE("struct_specifier->STRUCT ID");
   }
   ;
@@ -126,12 +225,14 @@ func_decl
   ;
 
 pointers
-  : '*'
+  : '*' pointers
   {
-    REDUCE("pointers->'*'");
+    $$ = $2 + 1;  /* count pointers */
+    REDUCE("pointers->'*' pointers");
   }
   | %empty
   {
+    $$ = 0;  /* no pointer */
     REDUCE("pointers->epsilon");
   }
   ;
@@ -172,17 +273,64 @@ def_list
 def
   : type_specifier pointers ID ';'
   {
+    /* same logic as ext_def */
+    if ($1 == NULL) {
+      /* type error propagation */
+    } else {
+      struct decl *basetype = $1;
+      int i;  /* C90 compatibility */
+      
+      for (i = 0; i < $2; i++) {
+        basetype = makeptrdecl(basetype);
+      }
+      
+      struct decl *vardecl = makevardecl(basetype);
+      
+      if (findcurrentdecl($3) != NULL) {
+        error_redeclaration();
+      } else {
+        declare($3, vardecl);
+      }
+    }
+    /* do not use $$ */
     REDUCE("def->type_specifier pointers ID ';'");
   }
   | type_specifier pointers ID '[' INTEGER_CONST ']' ';'
   {
+    /* same as ext_def array */
+    if ($1 == NULL) {
+      /* type error propagation */
+    } else {
+      struct decl *basetype = $1;
+      int i;  /* C90 compatibility */
+      
+      for (i = 0; i < $2; i++) {
+        basetype = makeptrdecl(basetype);
+      }
+      
+      struct decl *elemvar = makevardecl(basetype);
+      struct decl *arraydecl = makearraydecl($5, elemvar);
+      struct decl *constdecl = makeconstdecl(arraydecl);
+      
+      if (findcurrentdecl($3) != NULL) {
+        error_redeclaration();
+      } else {
+        declare($3, constdecl);
+      }
+    }
+    /* do not use $$ */
     REDUCE("def->type_specifier pointers ID '[' INTEGER_CONST ']' ';'");
   }
   ;
 
 compound_stmt
-  : '{' def_list stmt_list '}'
+  : '{'
   {
+    push_scope();  /* enter new scope */
+  }
+  def_list stmt_list '}'
+  {
+    pop_scope();  /* exit scope */
     REDUCE("compound_stmt->'{' def_list stmt_list '}'");
   }
   ;

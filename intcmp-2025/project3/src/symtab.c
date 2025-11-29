@@ -21,9 +21,28 @@ void push_scope() {
     scope_markers[scope_level++] = def_stack_top;
 }
 
-/* pop_scope: scope 종료 시 호출 */
-void pop_scope() {
-    def_stack_top = scope_markers[--scope_level];
+/* pop_scope: scope 종료 시 그 scope의 symbol들을 반환 */
+struct ste* pop_scope() {
+    /* 기존 로직 유지하면서 리스트 생성 추가 */
+    struct ste *old_marker = (scope_level > 0) ? scope_markers[scope_level-1] : NULL;
+    struct ste *result = NULL;
+    struct ste *prev = NULL;
+    
+    /* collect symbols while restoring stack */
+    while (def_stack_top != old_marker) {
+        struct ste *current = def_stack_top;
+        def_stack_top = def_stack_top->prev;  /* 기존 pop 동작 */
+        
+        /* build return list */
+        current->prev = prev;
+        prev = current;
+    }
+    result = prev;
+    
+    /* 기존 로직: scope_level 감소 */
+    scope_level--;
+    
+    return result;  /* popscope reverses stes */
 }
 
 /* lookup: 현재 scope부터 상위로 검색 */
@@ -141,6 +160,51 @@ struct decl* makeconstdecl(struct decl *type) {
     d->declclass = DECL_CONST;
     d->type = type;
     return d;
+}
+
+/* makestructdecl: STRUCT TYPE declaration 생성 */
+struct decl* makestructdecl(struct ste *fields) {
+    struct decl *d = (struct decl*)malloc(sizeof(struct decl));
+    memset(d, 0, sizeof(struct decl));
+    
+    /* 필수 필드 설정 */
+    d->declclass = DECL_TYPE;
+    d->typeclass = TYPE_STRUCT;
+    d->fieldlist = fields;
+    
+    /* struct 크기 계산 (padding 없이 단순 합) */
+    d->size = 0;
+    struct ste *field = fields;
+    while (field != NULL) {
+        if (field->decl && field->decl->size > 0) {
+            d->size += field->decl->size;
+        }
+        field = field->prev;
+    }
+    
+    /* 명시적 초기화 - 디버깅 용이성 */
+    d->type = NULL;          /* TYPE decl은 type 필드 미사용 */
+    d->value = 0;            /* STRUCT는 상수값 없음 */
+    d->real_value = 0.0;     /* STRUCT는 실수값 없음 */
+    d->formals = NULL;       /* STRUCT는 함수 아님 */
+    d->returntype = NULL;    /* STRUCT는 함수 아님 */
+    d->elementvar = NULL;    /* STRUCT는 배열 아님 */
+    d->num_index = 0;        /* STRUCT는 배열 아님 */
+    d->ptrto = NULL;         /* STRUCT는 포인터 타입 아님 */
+    d->next = NULL;          /* 단독 선언 */
+    
+    return d;
+}
+
+/* check_is_struct_type: struct type인지 확인하고 에러 출력 */
+int check_is_struct_type(struct decl *decl) {
+    if (decl == NULL || 
+        decl->declclass != DECL_TYPE || 
+        decl->typeclass != TYPE_STRUCT) {
+        error_incomplete();  /* struct_specifier에서만 사용 */
+        return 0;
+    }
+    return 1;
 }
 
 /* init_type: built-in 타입 초기화 */
