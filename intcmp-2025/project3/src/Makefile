@@ -16,7 +16,7 @@ CFLAGS = -g
 LDFLAGS = -lfl
 
 # Modify here if there are additional source files.
-OBJECTS = subc.tab.o lex.yy.o hash.o
+OBJECTS = subc.tab.o lex.yy.o hash.o symtab.o
 
 all: subc
 

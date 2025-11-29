@@ -132,20 +132,15 @@ int get_lineno() {
 }
 
 int main(int argc, char* argv[]) {
-  // Define reserved keywords
-  // I think it is not necessary
-  char *keyword[] = { "int", NULL };
-  int tokentype[] = { TYPE, 0 };
-
-  // Initialize the hash table
-  for(int i=0; keyword[i] != NULL; i++) {
-    enter(tokentype[i], keyword[i], strlen(keyword[i]));
-  }
+  // Initialize semantic analyzer's symbol table with built-in types
+  init_type();
 
   // I/O stream settings
   if (argc >= 2) {
+    filename = argv[1];
     yyin = fopen(argv[1], "r");
   } else {
+    filename = "stdin";
     yyin = stdin;
   }
 
