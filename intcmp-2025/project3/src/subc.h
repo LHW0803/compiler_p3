@@ -66,6 +66,7 @@ struct exprinfo {
     int is_lvalue;          /* = 왼쪽에 올 수 있는가? */
     int is_var;             /* & 연산자 적용 가능한 단순 변수인가? */
     int is_null_const;      /* SYM_NULL 리터럴인가? */
+    struct exprinfo *next;  /* 인자 리스트용 */
 };
 
 // Hash table interfaces
@@ -100,12 +101,16 @@ int is_pointer_type(struct decl *t);
 int is_array_type(struct decl *t);
 int is_struct_type(struct decl *t);
 int check_same_type(struct decl *t1, struct decl *t2);
+int check_function_arguments(struct decl *funcdecl, struct exprinfo *actuals);
 
 // Global built-in types
 extern struct decl *inttype;
 extern struct decl *chartype;
 extern struct decl *voidtype;
 extern struct id *returnid;
+
+// Current function's return type (Step G)
+extern struct decl *current_func_ret_type;
 
 // [Project 2] Reduce macro for debugging parse rules
 #define REDUCE(s) reduce(s)

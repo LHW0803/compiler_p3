@@ -12,6 +12,7 @@
 
 #include "subc.h"
 #include "subc.tab.h"
+int yyparse(void);
 static int comment_depth = 0;
 static int lineno = 1;
 %}
@@ -164,4 +165,8 @@ int main(int argc, char* argv[]) {
   fclose(yyin);
 
   return 0;
+}
+
+int yywrap(void) {
+  return 1;
 }

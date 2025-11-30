@@ -89,6 +89,7 @@ struct decl *inttype = NULL;
 struct decl *chartype = NULL; 
 struct decl *voidtype = NULL;
 struct id *returnid = NULL;
+struct decl *current_func_ret_type = NULL;
 
 /* Helper 함수들 */
 
@@ -289,4 +290,39 @@ void init_type() {
     
     /* return용 특수 ID */
     returnid = enter(ID, "*return", 7);
+}
+
+/* Error function implementations for Step F */
+void error_function(void) {
+    error_preamble();
+    printf("not a function\n");
+}
+
+void error_arguments(void) {
+    error_preamble();
+    printf("incompatible arguments in function call\n");
+}
+
+/* Check function arguments match formals */
+int check_function_arguments(struct decl *funcdecl, struct exprinfo *actuals) {
+    struct ste *formal = funcdecl->formals;
+    struct exprinfo *actual = actuals;
+    
+    /* formals와 actuals 비교 - 둘 다 역순이므로 순서대로 매칭됨 */
+    while (formal != NULL && actual != NULL) {
+        /* formal->decl은 DECL_VAR이고, formal->decl->type이 실제 타입 */
+        struct decl *formal_type = formal->decl->type;
+        if (!check_same_type(formal_type, actual->type)) {
+            return 0;  /* 타입 불일치 */
+        }
+        formal = formal->prev;
+        actual = actual->next;
+    }
+    
+    /* 개수 확인 */
+    if (formal != NULL || actual != NULL) {
+        return 0;  /* 인자 개수 다름 */
+    }
+    
+    return 1;  /* 인자 일치 */
 }

@@ -8,6 +8,8 @@
 
 %{
 /* Prologue section */
+#include <stdio.h>
+#include <stdlib.h>  /* malloc을 위해 필요 */
 #include "subc.h"
 
 int   yylex ();
@@ -42,6 +44,7 @@ static struct decl *apply_pointers(struct decl *base, int levels) {
   struct id *idptr;      /* Phase 2: ID용 추가 */
   struct decl *declptr;  /* Phase 3 준비용 추가 */
   struct exprinfo expr;  /* Phase 3 Step E: 표현식 정보 */
+  struct exprinfo *exprlist;  /* Phase 3 Step F: 인자 리스트용 */
 }
 
 /* Tokens and Types */
@@ -58,6 +61,7 @@ static struct decl *apply_pointers(struct decl *base, int levels) {
 %type<declptr>    type_specifier struct_specifier func_decl
 %type<intVal>     pointers
 %type<expr>       unary binary expr assignment expr_e
+%type<exprlist>   args
 
 /* Precedences and Associativity (low to high) */
 %left ','
@@ -442,6 +446,11 @@ compound_stmt
       /* 1) returnid 설치 */
       declare(returnid, pending_func->returntype);
       
+      /* Step G: 현재 함수의 반환 타입 추적 */
+      current_func_ret_type = pending_func->returntype;
+      
+      $<declptr>$ = pending_func;  /* 함수 body 시작을 표시 */
+      
       /* 2) formals 리스트 순회하며 매개변수 설치 
        * 주의: formals는 역순 (c→b→a)이므로 
        * 설치 후에는 body scope에서도 역순으로 쌓임 */
@@ -453,11 +462,19 @@ compound_stmt
       }
       
       pending_func = NULL;  /* 사용 완료 */
+    } else {
+      $<declptr>$ = NULL;  /* 중첩된 블록 표시 */
     }
   }
   def_list stmt_list '}'
   {
     pop_scope();
+    
+    /* Step G: 함수 body 종료 시에만 current_func_ret_type 정리 */
+    if ($<declptr>2 != NULL) {
+      current_func_ret_type = NULL;
+    }
+    
     REDUCE("compound_stmt->'{' def_list stmt_list '}'");
   }
   ;
@@ -482,8 +499,29 @@ stmt
   {
     REDUCE("stmt->compound_stmt");
   }
+  | RETURN ';'
+  {
+    /* Step G: current_func_ret_type 사용 */
+    if (current_func_ret_type != NULL) {
+      if (current_func_ret_type != voidtype) {
+        error_return();  /* void가 아닌 함수에서 값 없이 return */
+      }
+    }
+    /* current_func_ret_type == NULL: 함수 밖 return - 조용히 무시 */
+    REDUCE("stmt->RETURN ';'");
+  }
   | RETURN expr ';'
   {
+    /* Step G: current_func_ret_type 사용 */
+    /* 에러 전파: $2.type == NULL이면 expr에서 이미 에러 */
+    if (current_func_ret_type != NULL && $2.type != NULL) {
+      if (current_func_ret_type == voidtype) {
+        error_return();  /* void 함수에서 값 반환 */
+      } else if (!check_same_type(current_func_ret_type, $2.type)) {
+        error_return();  /* 타입 불일치 */
+      }
+    }
+    /* current_func_ret_type == NULL: 함수 밖 return - 조용히 무시 */
     REDUCE("stmt->RETURN expr ';'");
   }
   | ';'
@@ -528,6 +566,7 @@ expr_e
     $$.is_lvalue = 0;
     $$.is_var = 0;
     $$.is_null_const = 0;
+    $$.next = NULL;
     REDUCE("expr_e->epsilon");
   }
   ;
@@ -815,6 +854,7 @@ unary
     $$.is_lvalue = 0;
     $$.is_var = 0;
     $$.is_null_const = 0;
+    $$.next = NULL;
     REDUCE("unary->INTEGER_CONST");
   }
   | CHAR_CONST
@@ -823,6 +863,7 @@ unary
     $$.is_lvalue = 0;
     $$.is_var = 0;
     $$.is_null_const = 0;
+    $$.next = NULL;
     REDUCE("unary->CHAR_CONST");
   }
   | STRING
@@ -831,6 +872,7 @@ unary
     $$.is_lvalue = 0;
     $$.is_var = 0;
     $$.is_null_const = 0;
+    $$.next = NULL;
     REDUCE("unary->STRING");
   }
   | ID
@@ -842,9 +884,10 @@ unary
       $$.is_lvalue = 0;
       $$.is_var = 0;
       $$.is_null_const = 0;
+      $$.next = NULL;
     } else if (d->declclass == DECL_VAR) {
       struct decl *t = get_type(d);
-      $$.type = d->type;
+      $$.type = t;  /* Step G fix: use get_type result instead of d->type */
       $$.is_lvalue = 1;
       
       /* & 연산자는 스칼라 변수(int, char)에만 허용 */
@@ -855,23 +898,27 @@ unary
       }
       
       $$.is_null_const = 0;
+      $$.next = NULL;
     } else if (d->declclass == DECL_CONST) {
       $$.type = d->type;
       $$.is_lvalue = 0;   /* 배열은 lvalue 아님 */
       $$.is_var = 0;      /* &arr 불가 */
       $$.is_null_const = 0;
+      $$.next = NULL;
     } else if (d->declclass == DECL_FUNC) {
-      /* Step F에서 처리 */
-      $$.type = NULL;
+      /* 함수 이름은 함수 decl 자체를 type으로 */
+      $$.type = d;
       $$.is_lvalue = 0;
       $$.is_var = 0;
       $$.is_null_const = 0;
+      $$.next = NULL;
     } else {
       error_undeclared();
       $$.type = NULL;
       $$.is_lvalue = 0;
       $$.is_var = 0;
       $$.is_null_const = 0;
+      $$.next = NULL;
     }
     REDUCE("unary->ID");
   }
@@ -1144,20 +1191,94 @@ unary
   }
   | unary '(' args ')'
   {
-    /* TODO: Step F에서 구현 */
-    $$.type = NULL;
-    $$.is_lvalue = 0;
-    $$.is_var = 0;
-    $$.is_null_const = 0;
+    /* 인자 리스트에 에러가 있는지 먼저 확인 */
+    struct exprinfo *it = $3;
+    int has_arg_error = 0;
+    while (it != NULL) {
+        if (it->type == NULL) {
+            has_arg_error = 1;
+            break;
+        }
+        it = it->next;
+    }
+    
+    if (has_arg_error) {
+        /* 인자에서 이미 에러 발생 - 전파만 */
+        $$.type = NULL;
+        $$.is_lvalue = 0;
+        $$.is_var = 0;
+        $$.is_null_const = 0;
+        $$.next = NULL;
+    } else if ($1.type == NULL) {
+        /* 함수명 자체에서 에러 - 전파만 */
+        $$.type = NULL;
+        $$.is_lvalue = 0;
+        $$.is_var = 0;
+        $$.is_null_const = 0;
+        $$.next = NULL;
+    } else {
+        struct decl *callee = $1.type;
+        
+        if (callee == NULL || callee->declclass != DECL_FUNC) {
+            error_function();   /* not a function */
+            $$.type = NULL;
+            $$.is_lvalue = 0;
+            $$.is_var = 0;
+            $$.is_null_const = 0;
+            $$.next = NULL;
+        } else if (!check_function_arguments(callee, $3)) {
+            error_arguments();  /* incompatible arguments */
+            $$.type = NULL;
+            $$.is_lvalue = 0;
+            $$.is_var = 0;
+            $$.is_null_const = 0;
+            $$.next = NULL;
+        } else {
+            /* 호출 성공: 반환 타입 전파 */
+            $$.type = callee->returntype;
+            $$.is_lvalue = 0;
+            $$.is_var = 0;
+            $$.is_null_const = 0;
+            $$.next = NULL;
+        }
+    }
     REDUCE("unary->unary '(' args ')'");
   }
   | unary '(' ')'
   {
-    /* TODO: Step F에서 구현 */
-    $$.type = NULL;
-    $$.is_lvalue = 0;
-    $$.is_var = 0;
-    $$.is_null_const = 0;
+    if ($1.type == NULL) {
+        $$.type = NULL;
+        $$.is_lvalue = 0;
+        $$.is_var = 0;
+        $$.is_null_const = 0;
+        $$.next = NULL;
+    } else {
+        struct decl *callee = $1.type;
+        
+        if (callee == NULL || callee->declclass != DECL_FUNC) {
+            error_function();
+            $$.type = NULL;
+            $$.is_lvalue = 0;
+            $$.is_var = 0;
+            $$.is_null_const = 0;
+            $$.next = NULL;
+        } else if (callee->formals != NULL) {
+            /* formals가 있는데 인자가 없음 */
+            error_arguments();
+            $$.type = NULL;
+            $$.is_lvalue = 0;
+            $$.is_var = 0;
+            $$.is_null_const = 0;
+            $$.next = NULL;
+        } else {
+            /* 인자 없음, formals도 없음 -> OK */
+            $$.type = callee->returntype;
+            $$.is_lvalue = 0;
+            $$.is_var = 0;
+            $$.is_null_const = 0;
+            $$.next = NULL;
+        }
+    }
     REDUCE("unary->unary '(' ')'");
   }
   | SYM_NULL
@@ -1166,6 +1287,7 @@ unary
     $$.is_lvalue = 0;
     $$.is_var = 0;
     $$.is_null_const = 1;  /* NULL 리터럴 표시 */
+    $$.next = NULL;
     REDUCE("unary->SYM_NULL");
   }
   ;
@@ -1173,13 +1295,23 @@ unary
 args
   : expr
   {
-    /* Step F에서 구현 예정 - 지금은 단순히 타입 체크만 */
-    REDUCE("args->expr");
+      /* 첫 번째 인자: 새 노드를 만들어서 head로 사용 */
+      struct exprinfo *node = (struct exprinfo *)malloc(sizeof(struct exprinfo));
+      *node = $1;
+      node->next = NULL;
+      
+      $$ = node;
+      REDUCE("args->expr");
   }
   | args ',' expr
   {
-    /* Step F에서 구현 예정 - 지금은 단순히 타입 체크만 */
-    REDUCE("args->args ',' expr");
+      /* 추가 인자: 새 노드를 만들어 앞에 붙이기 (역순 리스트) */
+      struct exprinfo *node = (struct exprinfo *)malloc(sizeof(struct exprinfo));
+      *node = $3;
+      node->next = $1;   /* 기존 리스트 앞에 새 노드 */
+      $$ = node;
+      
+      REDUCE("args->args ',' expr");
   }
   ;
 
@@ -1291,12 +1423,4 @@ void error_return(void) {
   printf("incompatible return types\n");
 }
 
-void error_function(void) {
-  error_preamble();
-  printf("not a function\n");
-}
-
-void error_arguments(void) {
-  error_preamble();
-  printf("incompatible arguments in function call\n");
-}
+/* error_function and error_arguments are defined in symtab.c */
