@@ -625,6 +625,10 @@ assignment
       $$.is_var = 0;
       $$.is_null_const = 0;
     } else {
+      /* DEBUG: Print assignment info */
+      /* fprintf(stderr, "DEBUG: Assignment successful - LHS type=%p (kind=%d), RHS type=%p (kind=%d)\n",
+              (void*)$1.type, $1.type ? $1.type->declclass : -1,
+              (void*)$3.type, $3.type ? $3.type->declclass : -1); */
       $$ = $1;  /* 할당 성공 */
     }
     REDUCE("assignment->unary '=' assignment");
@@ -859,6 +863,10 @@ unary
   }
   | CHAR_CONST
   {
+    /* DEBUG: Print CHAR_CONST type */
+    /* fprintf(stderr, "DEBUG: CHAR_CONST - chartype=%p (declclass=%d, typeclass=%d)\n",
+            (void*)chartype, chartype ? chartype->declclass : -1,
+            chartype ? chartype->typeclass : -1); */
     $$.type = chartype;
     $$.is_lvalue = 0;
     $$.is_var = 0;
@@ -887,6 +895,14 @@ unary
       $$.next = NULL;
     } else if (d->declclass == DECL_VAR) {
       struct decl *t = get_type(d);
+      /* DEBUG: Print type information */
+      /* fprintf(stderr, "DEBUG: Variable '%s' - d=%p, d->type=%p, get_type(d)=%p\n", 
+              $1->name, (void*)d, (void*)(d ? d->type : NULL), (void*)t); */
+      /* if (t) {
+        fprintf(stderr, "      type declclass = %d, typeclass = %d\n", 
+              t->declclass, t->typeclass);
+      } */
+      
       $$.type = t;  /* Step G fix: use get_type result instead of d->type */
       $$.is_lvalue = 1;
       
@@ -1305,11 +1321,19 @@ args
   }
   | args ',' expr
   {
-      /* 추가 인자: 새 노드를 만들어 앞에 붙이기 (역순 리스트) */
+      /* 추가 인자: 새 노드를 만들어 끝에 붙이기 (정순 리스트) */
       struct exprinfo *node = (struct exprinfo *)malloc(sizeof(struct exprinfo));
       *node = $3;
-      node->next = $1;   /* 기존 리스트 앞에 새 노드 */
-      $$ = node;
+      node->next = NULL;
+      
+      /* 리스트 끝까지 가서 추가 */
+      struct exprinfo *p = $1;
+      while (p->next != NULL) {
+          p = p->next;
+      }
+      p->next = node;
+      
+      $$ = $1;  /* head는 그대로 유지 */
       
       REDUCE("args->args ',' expr");
   }
