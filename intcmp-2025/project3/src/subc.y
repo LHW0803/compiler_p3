@@ -18,6 +18,19 @@ void  reduce(char* s);
 
 /* [Project 3] Add filename variable for error messages */
 char* filename;
+
+/* Phase 3 Step D: Function declarations support */
+static struct decl *pending_func = NULL;  /* 현재 함수 declaration 전달용 */
+
+/* 헬퍼 함수: pointer 레벨 적용 */
+static struct decl *apply_pointers(struct decl *base, int levels) {
+    int i;
+    struct decl *t = base;
+    for (i = 0; i < levels && t != NULL; i++) {
+        t = makeptrdecl(t);
+    }
+    return t;
+}
 %}
 
 /* Bison declarations section */
@@ -28,10 +41,12 @@ char* filename;
   char  *stringVal;
   struct id *idptr;      /* Phase 2: ID용 추가 */
   struct decl *declptr;  /* Phase 3 준비용 추가 */
+  struct exprinfo expr;  /* Phase 3 Step E: 표현식 정보 */
 }
 
 /* Tokens and Types */
 /* Add more tokens and types */
+%token<declptr>   TYPE
 %token            STRUCT
 %token            SYM_NULL RETURN IF ELSE WHILE FOR BREAK CONTINUE
 %token            LOGICAL_OR LOGICAL_AND RELOP EQUOP INCOP DECOP STRUCTOP
@@ -40,8 +55,9 @@ char* filename;
 %token<intVal>    INTEGER_CONST
 
 /* Non-terminal types for Phase 3 */
-%type<declptr>    type_id type_specifier struct_specifier
+%type<declptr>    type_specifier struct_specifier func_decl
 %type<intVal>     pointers
+%type<expr>       unary binary expr assignment expr_e
 
 /* Precedences and Associativity (low to high) */
 %left ','
@@ -74,7 +90,7 @@ ext_def_list
   {
     REDUCE("ext_def_list->ext_def_list ext_def");
   }
-  | %empty
+  | /* empty */
   {
     REDUCE("ext_def_list->epsilon");
   }
@@ -143,31 +159,12 @@ ext_def
   }
   ;
 
-type_id
-  : ID
-  {
-    /* lookup and check if it's a type */
-    struct decl *declptr = lookup($1);
-    
-    if (declptr == NULL) {
-      error_undeclared();
-      $$ = NULL;
-    } else if (!check_is_type(declptr)) {
-      /* not a type declaration */
-      error_undeclared();  /* TODO: may need different error later */
-      $$ = NULL;
-    } else {
-      $$ = declptr;
-    }
-    REDUCE("type_id->ID");
-  }
-  ;
-
 type_specifier
-  : type_id
+  : TYPE
   {
-    $$ = $1;  /* propagate type_id result */
-    REDUCE("type_specifier->type_id");
+    /* lexer에서 이미 inttype/chartype/voidtype을 declptr로 실어줌 */
+    $$ = $1;
+    REDUCE("type_specifier->TYPE");
   }
   | struct_specifier
   {
@@ -216,10 +213,84 @@ struct_specifier
 func_decl
   : type_specifier pointers ID '(' ')'
   {
+    pending_func = NULL;  /* 이전 함수 잔여값 클리어 */
+    
+    if ($1 == NULL) {
+      $$ = NULL;  /* 타입 에러 전파 */
+    } else {
+      /* 반환 타입 생성 */
+      struct decl *rettype = apply_pointers($1, $2);
+      
+      if (rettype == NULL) {
+        $$ = NULL;
+      } else {
+        /* 함수 declaration 생성 */
+        struct decl *funcdecl = makefuncdecl();
+        
+        /* 재선언 검사 */
+        if (findcurrentdecl($3) != NULL) {
+          error_redeclaration();
+          $$ = NULL;
+        } else {
+          declare($3, funcdecl);
+          funcdecl->returntype = rettype;
+          funcdecl->formals = NULL;  /* 매개변수 없음 */
+          
+          /* compound_stmt로 전달 */
+          pending_func = funcdecl;
+          
+          $$ = funcdecl;
+        }
+      }
+    }
     REDUCE("func_decl->type_specifier pointers ID '(' ')'");
   }
-  | type_specifier pointers ID '(' param_list ')'
+  | type_specifier pointers ID '('
   {
+    pending_func = NULL;  /* 초기화 */
+    
+    struct decl *rettype = NULL;
+    struct decl *funcdecl = NULL;
+    
+    if ($1 != NULL) {
+      rettype = apply_pointers($1, $2);
+    }
+    
+    /* 함수 선언 자체가 유효한지 체크 */
+    if ($1 == NULL || rettype == NULL) {
+      /* type 에러 */
+      funcdecl = NULL;
+    } else if (findcurrentdecl($3) != NULL) {
+      error_redeclaration();
+      funcdecl = NULL;
+    } else {
+      funcdecl = makefuncdecl();
+      declare($3, funcdecl);
+      funcdecl->returntype = rettype;
+    }
+    
+    /* 매개변수 수집용 scope는 항상 연다 (균형 보장) */
+    push_scope();
+    /* returnid는 여기서 declare하지 않음 - formals 전용 scope */
+    
+    $<declptr>$ = funcdecl;
+  }
+  param_list ')'
+  {
+    struct decl *funcdecl = $<declptr>5;
+    struct ste *formals = pop_scope();  /* 실패든 성공이든 항상 pop */
+    
+    if (funcdecl == NULL) {
+      /* 에러 상태: formals 버리고 NULL 전파 */
+      pending_func = NULL;
+      $$ = NULL;
+    } else {
+      /* 정상 처리: formals는 헤더 정보로만 보관 */
+      funcdecl->formals = formals;  /* 순수 매개변수 리스트 (역순!) */
+      pending_func = funcdecl;       /* compound_stmt로 전달 */
+      
+      $$ = funcdecl;
+    }
     REDUCE("func_decl->type_specifier pointers ID '(' param_list ')'");
   }
   ;
@@ -230,7 +301,7 @@ pointers
     $$ = $2 + 1;  /* count pointers */
     REDUCE("pointers->'*' pointers");
   }
-  | %empty
+  | /* empty */
   {
     $$ = 0;  /* no pointer */
     REDUCE("pointers->epsilon");
@@ -251,10 +322,48 @@ param_list
 param_decl
   : type_specifier pointers ID
   {
+    if ($1 == NULL) {
+      /* type 에러 전파 - declare 하지 않음 */
+    } else {
+      struct decl *paramtype = apply_pointers($1, $2);
+      
+      if (paramtype == NULL) {
+        /* 포인터 생성 실패 */
+      } else {
+        struct decl *vardecl = makevardecl(paramtype);
+        
+        /* 매개변수 중복 검사 */
+        if (findcurrentdecl($3) != NULL) {
+          error_redeclaration();
+        } else {
+          declare($3, vardecl);
+        }
+      }
+    }
     REDUCE("param_decl->type_specifier pointers ID");
   }
   | type_specifier pointers ID '[' INTEGER_CONST ']'
   {
+    if ($1 == NULL) {
+      /* type 에러 전파 */
+    } else {
+      struct decl *basetype = apply_pointers($1, $2);
+      
+      if (basetype == NULL) {
+        /* 에러 전파 */
+      } else {
+        /* 배열 매개변수: 배열 타입 그대로 유지 (포인터 decay 없음) */
+        struct decl *elemvar = makevardecl(basetype);
+        struct decl *arraydecl = makearraydecl($5, elemvar);
+        struct decl *paramdecl = makeconstdecl(arraydecl);
+        
+        if (findcurrentdecl($3) != NULL) {
+          error_redeclaration();
+        } else {
+          declare($3, paramdecl);
+        }
+      }
+    }
     REDUCE("param_decl->type_specifier pointers ID '[' INTEGER_CONST ']'");
   }
   ;
@@ -264,7 +373,7 @@ def_list
   {
     REDUCE("def_list->def_list def");
   }
-  | %empty
+  | /* empty */
   {
     REDUCE("def_list->epsilon");
   }
@@ -326,11 +435,29 @@ def
 compound_stmt
   : '{'
   {
-    push_scope();  /* enter new scope */
+    push_scope();
+    
+    /* 함수 body인 경우 returnid와 매개변수들을 새로 declare */
+    if (pending_func != NULL) {
+      /* 1) returnid 설치 */
+      declare(returnid, pending_func->returntype);
+      
+      /* 2) formals 리스트 순회하며 매개변수 설치 
+       * 주의: formals는 역순 (c→b→a)이므로 
+       * 설치 후에는 body scope에서도 역순으로 쌓임 */
+      struct ste *p = pending_func->formals;
+      while (p != NULL) {
+        /* 새로운 ste를 body scope에 생성 */
+        declare(p->name, p->decl);
+        p = p->prev;
+      }
+      
+      pending_func = NULL;  /* 사용 완료 */
+    }
   }
   def_list stmt_list '}'
   {
-    pop_scope();  /* exit scope */
+    pop_scope();
     REDUCE("compound_stmt->'{' def_list stmt_list '}'");
   }
   ;
@@ -340,7 +467,7 @@ stmt_list
   {
     REDUCE("stmt_list->stmt_list stmt");
   }
-  | %empty
+  | /* empty */
   {
     REDUCE("stmt_list->epsilon");
   }
@@ -392,64 +519,286 @@ stmt
 expr_e
   : expr
   {
+    $$ = $1;
     REDUCE("expr_e->expr");
   }
-  | %empty
+  | /* empty */
   {
+    $$.type = NULL;
+    $$.is_lvalue = 0;
+    $$.is_var = 0;
+    $$.is_null_const = 0;
     REDUCE("expr_e->epsilon");
   }
   ;
 
 expr
-  : unary '=' expr
+  : assignment
   {
-    REDUCE("expr->unary '=' expr");
+    $$ = $1;
+    REDUCE("expr->assignment");
   }
-  | binary
+  ;
+
+assignment
+  : binary
   {
-    REDUCE("expr->binary");
+    $$ = $1;
+    REDUCE("assignment->binary");
+  }
+  | unary '=' assignment
+  {
+    /* 에러 체크 우선순위:
+     * 1. 기존 에러 전파
+     * 2. lvalue 검사
+     * 3. NULL 리터럴 특수 처리
+     * 4. 타입 호환성 검사
+     */
+    if ($1.type == NULL || ($3.type == NULL && !$3.is_null_const)) {
+      /* 1. 기존 에러 전파 */
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!$1.is_lvalue) {
+      /* 2. lvalue 검사 */
+      error_assignable();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if ($3.is_null_const) {
+      /* 3. NULL 리터럴 검사 */
+      if (!is_pointer_type($1.type)) {
+        error_null();
+        $$.type = NULL;
+        $$.is_lvalue = 0;
+        $$.is_var = 0;
+        $$.is_null_const = 0;
+      } else {
+        $$ = $1;  /* OK: 포인터에 NULL 할당 */
+      }
+    } else if (!check_same_type($1.type, $3.type)) {
+      /* 4. 타입 호환성 검사 */
+      error_incompatible();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$ = $1;  /* 할당 성공 */
+    }
+    REDUCE("assignment->unary '=' assignment");
   }
   ;
 
 binary
   : binary RELOP binary
   {
+    if ($1.type == NULL || $3.type == NULL) {
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!check_same_type($1.type, $3.type)) {
+      error_comparable();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_type($1.type) && !is_char_type($1.type)) {
+      error_comparable();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = inttype;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("binary->binary RELOP binary");
   }
   | binary EQUOP binary
   {
+    if ($1.type == NULL || $3.type == NULL) {
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!check_same_type($1.type, $3.type)) {
+      error_comparable();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_type($1.type) && 
+               !is_char_type($1.type) && 
+               !is_pointer_type($1.type)) {
+      error_comparable();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = inttype;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("binary->binary EQUOP binary");
   }
   | binary '+' binary
   {
+    if ($1.type == NULL || $3.type == NULL) {
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_type($1.type) || !is_int_type($3.type)) {
+      error_binary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = inttype;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("binary->binary '+' binary");
   }
   | binary '-' binary
   {
+    if ($1.type == NULL || $3.type == NULL) {
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_type($1.type) || !is_int_type($3.type)) {
+      error_binary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = inttype;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("binary->binary '-' binary");
   }
   | binary '*' binary
   {
+    if ($1.type == NULL || $3.type == NULL) {
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_type($1.type) || !is_int_type($3.type)) {
+      error_binary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = inttype;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("binary->binary '*' binary");
   }
   | binary '/' binary
   {
+    if ($1.type == NULL || $3.type == NULL) {
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_type($1.type) || !is_int_type($3.type)) {
+      error_binary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = inttype;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("binary->binary '/' binary");
   }
   | binary '%' binary
   {
+    if ($1.type == NULL || $3.type == NULL) {
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_type($1.type) || !is_int_type($3.type)) {
+      error_binary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = inttype;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("binary->binary '%' binary");
   }
   | binary LOGICAL_AND binary
   {
+    if ($1.type == NULL || $3.type == NULL) {
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_type($1.type) || !is_int_type($3.type)) {
+      error_binary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = inttype;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("binary->binary LOGICAL_AND binary");
   }
   | binary LOGICAL_OR binary
   {
+    if ($1.type == NULL || $3.type == NULL) {
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_type($1.type) || !is_int_type($3.type)) {
+      error_binary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = inttype;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("binary->binary LOGICAL_OR binary");
   }
   | unary %prec '='
   {
+    $$ = $1;
     REDUCE("binary->unary");
   }
   ;
@@ -457,78 +806,366 @@ binary
 unary
   : '(' expr ')'
   {
+    $$ = $2;  /* 모든 속성 전파 */
     REDUCE("unary->'(' expr ')'");
   }
   | INTEGER_CONST
   {
+    $$.type = inttype;
+    $$.is_lvalue = 0;
+    $$.is_var = 0;
+    $$.is_null_const = 0;
     REDUCE("unary->INTEGER_CONST");
   }
   | CHAR_CONST
   {
+    $$.type = chartype;
+    $$.is_lvalue = 0;
+    $$.is_var = 0;
+    $$.is_null_const = 0;
     REDUCE("unary->CHAR_CONST");
   }
   | STRING
   {
+    $$.type = makeptrdecl(chartype);  /* char* 타입 생성 */
+    $$.is_lvalue = 0;
+    $$.is_var = 0;
+    $$.is_null_const = 0;
     REDUCE("unary->STRING");
   }
   | ID
   {
+    struct decl *d = lookup($1);
+    if (d == NULL) {
+      error_undeclared();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (d->declclass == DECL_VAR) {
+      struct decl *t = get_type(d);
+      $$.type = d->type;
+      $$.is_lvalue = 1;
+      
+      /* & 연산자는 스칼라 변수(int, char)에만 허용 */
+      if (is_pointer_type(t) || is_array_type(t) || is_struct_type(t)) {
+        $$.is_var = 0;  /* &p, &arr, &s 모두 금지 */
+      } else {
+        $$.is_var = 1;  /* int, char 등만 허용 */
+      }
+      
+      $$.is_null_const = 0;
+    } else if (d->declclass == DECL_CONST) {
+      $$.type = d->type;
+      $$.is_lvalue = 0;   /* 배열은 lvalue 아님 */
+      $$.is_var = 0;      /* &arr 불가 */
+      $$.is_null_const = 0;
+    } else if (d->declclass == DECL_FUNC) {
+      /* Step F에서 처리 */
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      error_undeclared();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("unary->ID");
   }
   | '-' unary %prec '!'
   {
+    if ($2.type == NULL) {
+      $$ = $2;  /* 에러 전파 */
+    } else if (!is_int_or_char_type($2.type)) {
+      error_unary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = $2.type;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("unary->'-' unary");
   }
   | '!' unary
   {
+    if ($2.type == NULL) {
+      $$ = $2;
+    } else if (!is_int_type($2.type)) {
+      error_unary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = inttype;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("unary->'!' unary");
   }
   | unary INCOP
   {
+    if ($1.type == NULL) {
+      $$ = $1;
+    } else if (!$1.is_lvalue) {
+      error_assignable();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_or_char_type($1.type)) {
+      error_unary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$ = $1;  /* 타입 변화 없음 */
+    }
     REDUCE("unary->unary INCOP");
   }
   | unary DECOP
   {
+    if ($1.type == NULL) {
+      $$ = $1;
+    } else if (!$1.is_lvalue) {
+      error_assignable();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_or_char_type($1.type)) {
+      error_unary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$ = $1;  /* 타입 변화 없음 */
+    }
     REDUCE("unary->unary DECOP");
   }
   | INCOP unary
   {
+    if ($2.type == NULL) {
+      $$ = $2;
+    } else if (!$2.is_lvalue) {
+      error_assignable();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_or_char_type($2.type)) {
+      error_unary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$ = $2;  /* 타입 변화 없음 */
+    }
     REDUCE("unary->INCOP unary");
   }
   | DECOP unary
   {
+    if ($2.type == NULL) {
+      $$ = $2;
+    } else if (!$2.is_lvalue) {
+      error_assignable();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_or_char_type($2.type)) {
+      error_unary();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$ = $2;  /* 타입 변화 없음 */
+    }
     REDUCE("unary->DECOP unary");
   }
   | '&' unary %prec '!'
   {
+    if ($2.type == NULL) {
+      $$ = $2;
+    } else if (!$2.is_var) {
+      error_addressof();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      $$.type = makeptrdecl($2.type);
+      $$.is_lvalue = 0;  /* &a는 rvalue */
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    }
     REDUCE("unary->'&' unary");
   }
   | '*' unary %prec '!'
   {
+    if ($2.type == NULL) {
+      $$ = $2;
+    } else if (!is_pointer_type($2.type)) {
+      error_indirection();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      struct decl *pointee = get_type($2.type)->ptrto;
+      $$.type = pointee;
+      $$.is_lvalue = 1;  /* *p는 lvalue */
+      $$.is_var = 1;     /* &(*p)도 가능 */
+      $$.is_null_const = 0;
+    }
     REDUCE("unary->'*' unary");
   }
   | unary '[' expr ']'
   {
+    if ($1.type == NULL || $3.type == NULL) {
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_array_type($1.type)) {
+      error_array();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else if (!is_int_type($3.type)) {
+      error_subscript();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      /* 배열의 element 타입 가져오기 */
+      struct decl *elem = get_type($1.type)->elementvar;
+      $$.type = (elem && elem->type) ? elem->type : NULL;
+      $$.is_lvalue = 1;  /* arr[i]는 lvalue */
+      $$.is_var = 1;     /* &arr[i] 가능 */
+      $$.is_null_const = 0;
+    }
     REDUCE("unary->unary '[' expr ']'");
   }
   | unary '.' ID
   {
+    if ($1.type == NULL) {
+      $$ = $1;
+    } else if (!is_struct_type($1.type)) {
+      error_struct();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      /* struct member 찾기 */
+      struct ste *field = get_type($1.type)->fieldlist;
+      struct decl *member_decl = NULL;
+      while (field != NULL) {
+        if (field->name == $3) {
+          member_decl = field->decl;
+          break;
+        }
+        field = field->prev;
+      }
+      if (member_decl == NULL) {
+        error_member();
+        $$.type = NULL;
+        $$.is_lvalue = 0;
+        $$.is_var = 0;
+        $$.is_null_const = 0;
+      } else {
+        $$.type = member_decl->type;  /* VAR의 type */
+        $$.is_lvalue = $1.is_lvalue;  /* struct가 lvalue면 member도 lvalue */
+        $$.is_var = $1.is_lvalue;      /* lvalue member는 &가능 */
+        $$.is_null_const = 0;
+      }
+    }
     REDUCE("unary->unary '.' ID");
   }
   | unary STRUCTOP ID
   {
+    if ($1.type == NULL) {
+      $$ = $1;
+    } else if (!is_pointer_type($1.type)) {
+      error_strurctp();
+      $$.type = NULL;
+      $$.is_lvalue = 0;
+      $$.is_var = 0;
+      $$.is_null_const = 0;
+    } else {
+      struct decl *pointee = get_type($1.type)->ptrto;
+      if (!is_struct_type(pointee)) {
+        error_strurctp();
+        $$.type = NULL;
+        $$.is_lvalue = 0;
+        $$.is_var = 0;
+        $$.is_null_const = 0;
+      } else {
+        /* struct member 찾기 */
+        struct ste *field = get_type(pointee)->fieldlist;
+        struct decl *member_decl = NULL;
+        while (field != NULL) {
+          if (field->name == $3) {
+            member_decl = field->decl;
+            break;
+          }
+          field = field->prev;
+        }
+        if (member_decl == NULL) {
+          error_member();
+          $$.type = NULL;
+          $$.is_lvalue = 0;
+          $$.is_var = 0;
+          $$.is_null_const = 0;
+        } else {
+          $$.type = member_decl->type;  /* VAR의 type */
+          $$.is_lvalue = 1;  /* p->member는 항상 lvalue */
+          $$.is_var = 1;      /* &(p->member) 가능 */
+          $$.is_null_const = 0;
+        }
+      }
+    }
     REDUCE("unary->unary STRUCTOP ID");
   }
   | unary '(' args ')'
   {
+    /* TODO: Step F에서 구현 */
+    $$.type = NULL;
+    $$.is_lvalue = 0;
+    $$.is_var = 0;
+    $$.is_null_const = 0;
     REDUCE("unary->unary '(' args ')'");
   }
   | unary '(' ')'
   {
+    /* TODO: Step F에서 구현 */
+    $$.type = NULL;
+    $$.is_lvalue = 0;
+    $$.is_var = 0;
+    $$.is_null_const = 0;
     REDUCE("unary->unary '(' ')'");
   }
   | SYM_NULL
   {
+    $$.type = inttype;  /* NULL은 일단 int로 취급 */
+    $$.is_lvalue = 0;
+    $$.is_var = 0;
+    $$.is_null_const = 1;  /* NULL 리터럴 표시 */
     REDUCE("unary->SYM_NULL");
   }
   ;
@@ -536,10 +1173,12 @@ unary
 args
   : expr
   {
+    /* Step F에서 구현 예정 - 지금은 단순히 타입 체크만 */
     REDUCE("args->expr");
   }
   | args ',' expr
   {
+    /* Step F에서 구현 예정 - 지금은 단순히 타입 체크만 */
     REDUCE("args->args ',' expr");
   }
   ;

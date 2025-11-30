@@ -207,6 +207,74 @@ int check_is_struct_type(struct decl *decl) {
     return 1;
 }
 
+/* makefuncdecl: FUNC declaration 생성 */
+struct decl* makefuncdecl(void) {
+    struct decl *d = (struct decl*)malloc(sizeof(struct decl));
+    memset(d, 0, sizeof(struct decl));
+    
+    d->declclass = DECL_FUNC;
+    /* formals, returntype는 나중에 설정 */
+    /* 다른 필드들은 0/NULL로 초기화됨 */
+    
+    return d;
+}
+
+/* get_type: 항상 TYPE decl을 반환하도록 정규화 */
+struct decl* get_type(struct decl *d) {
+    if (d == NULL) return NULL;
+    if (d->declclass == DECL_VAR || d->declclass == DECL_CONST)
+        return d->type;
+    return d;  /* 이미 TYPE */
+}
+
+/* Type checking helper functions */
+int is_int_type(struct decl *t) {
+    t = get_type(t);
+    return (t && t->declclass == DECL_TYPE && t->typeclass == TYPE_INT);
+}
+
+int is_char_type(struct decl *t) {
+    t = get_type(t);
+    return (t && t->declclass == DECL_TYPE && t->typeclass == TYPE_CHAR);
+}
+
+int is_int_or_char_type(struct decl *t) {
+    return is_int_type(t) || is_char_type(t);
+}
+
+int is_pointer_type(struct decl *t) {
+    t = get_type(t);
+    return (t && t->declclass == DECL_TYPE && t->typeclass == TYPE_PTR);
+}
+
+int is_array_type(struct decl *t) {
+    t = get_type(t);
+    return (t && t->declclass == DECL_TYPE && t->typeclass == TYPE_ARRAY);
+}
+
+int is_struct_type(struct decl *t) {
+    t = get_type(t);
+    return (t && t->declclass == DECL_TYPE && t->typeclass == TYPE_STRUCT);
+}
+
+/* check_same_type: 타입 동일성 검사 */
+int check_same_type(struct decl *t1, struct decl *t2) {
+    t1 = get_type(t1);
+    t2 = get_type(t2);
+    
+    if (t1 == NULL || t2 == NULL) return 0;
+    if (t1 == t2) return 1;  /* 같은 타입 decl */
+    
+    if (t1->typeclass != t2->typeclass) return 0;
+    
+    /* 포인터는 가리키는 타입까지 재귀 비교 */
+    if (t1->typeclass == TYPE_PTR) {
+        return check_same_type(t1->ptrto, t2->ptrto);
+    }
+    
+    return 0;
+}
+
 /* init_type: built-in 타입 초기화 */
 void init_type() {
     /* built-in 타입 생성 */

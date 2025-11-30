@@ -60,6 +60,14 @@ struct decl {
 #define TYPE_PTR    5
 #define TYPE_STRUCT 6
 
+/* Expression info for type propagation */
+struct exprinfo {
+    struct decl *type;      /* 실제 값의 타입 (항상 TYPE decl, 에러시 NULL) */
+    int is_lvalue;          /* = 왼쪽에 올 수 있는가? */
+    int is_var;             /* & 연산자 적용 가능한 단순 변수인가? */
+    int is_null_const;      /* SYM_NULL 리터럴인가? */
+};
+
 // Hash table interfaces
 unsigned hash(char *name);
 id *enter(int tokenType, char *name, int length);
@@ -80,7 +88,18 @@ struct decl* makeptrdecl(struct decl *type);
 struct decl* makearraydecl(int size, struct decl *elementvar);
 struct decl* makeconstdecl(struct decl *type);
 struct decl* makestructdecl(struct ste *fields);  /* 추가 */
+struct decl* makefuncdecl(void);  /* Step D 추가 */
 void init_type(void);
+
+// Type checking helpers (Step E)
+struct decl* get_type(struct decl *d);
+int is_int_type(struct decl *t);
+int is_char_type(struct decl *t);
+int is_int_or_char_type(struct decl *t);
+int is_pointer_type(struct decl *t);
+int is_array_type(struct decl *t);
+int is_struct_type(struct decl *t);
+int check_same_type(struct decl *t1, struct decl *t2);
 
 // Global built-in types
 extern struct decl *inttype;

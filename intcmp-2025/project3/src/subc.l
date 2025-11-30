@@ -36,7 +36,18 @@ special_char  \\[nt]
 
   /* Keywords */
   /* Add more Keyworks */
-  /* "int"|"char"                    { return TYPE; }  */  /* Phase 2: TYPE 토큰 제거 */
+"int"                           {
+                                  yylval.declptr = inttype;
+                                  return TYPE;
+                                }
+"char"                          {
+                                  yylval.declptr = chartype;
+                                  return TYPE;
+                                }
+"void"                          {
+                                  yylval.declptr = voidtype;
+                                  return TYPE;
+                                }
 "struct"                        { return STRUCT; }
 "NULL"                          { return SYM_NULL; }
 "return"                        { return RETURN; }
