@@ -890,11 +890,11 @@ unary
       $$.type = t;  /* Step G fix: use get_type result instead of d->type */
       $$.is_lvalue = 1;
       
-      /* & 연산자는 스칼라 변수(int, char)에만 허용 */
-      if (is_pointer_type(t) || is_array_type(t) || is_struct_type(t)) {
-        $$.is_var = 0;  /* &p, &arr, &s 모두 금지 */
+      /* & 연산자는 포인터와 배열에 대해서만 금지 */
+      if (is_pointer_type(t) || is_array_type(t)) {
+        $$.is_var = 0;  /* &p, &arr 금지 */
       } else {
-        $$.is_var = 1;  /* int, char 등만 허용 */
+        $$.is_var = 1;  /* int, char, struct 허용 */
       }
       
       $$.is_null_const = 0;

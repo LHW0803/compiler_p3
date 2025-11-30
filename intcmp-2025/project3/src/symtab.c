@@ -311,7 +311,8 @@ int check_function_arguments(struct decl *funcdecl, struct exprinfo *actuals) {
     /* formals와 actuals 비교 - 둘 다 역순이므로 순서대로 매칭됨 */
     while (formal != NULL && actual != NULL) {
         /* formal->decl은 DECL_VAR이고, formal->decl->type이 실제 타입 */
-        struct decl *formal_type = formal->decl->type;
+        struct decl *formal_type = get_type(formal->decl);
+        /* actual->type은 이미 정규화된 TYPE이어야 함 */
         if (!check_same_type(formal_type, actual->type)) {
             return 0;  /* 타입 불일치 */
         }

@@ -113,7 +113,8 @@ extern struct id *returnid;
 extern struct decl *current_func_ret_type;
 
 // [Project 2] Reduce macro for debugging parse rules
-#define REDUCE(s) reduce(s)
+// #define REDUCE(s) reduce(s)  // Disabled for final output
+#define REDUCE(s) /* do nothing */
 
 // Error message printing procedures
 extern char *filename;  /* filename for error messages */
